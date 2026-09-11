@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>JiraLogWork</title><link rel="stylesheet" href="popup.css"></head>
+<body class="is-initializing">
+  <header><strong>Today's worklog</strong><button id="calendar" title="Open full calendar">Calendar ↗</button></header>
+  <main>
+    <div id="status">Loading…</div>
+    <form id="form" class="worklog-form" hidden>
+      <label>Task<select id="issue" required></select></label>
+      <div class="timing-row">
+        <label>Start time
+          <div class="time-quick-picks">
+            <button type="button" class="time-quick-btn" data-time="09:00">9:00</button>
+            <button type="button" class="time-quick-btn" data-time="14:00">14:00</button>
+          </div>
+          <input id="time" type="time" step="1800" value="09:00" required>
+        </label>
+        <label>Hours
+          <input id="hours" type="number" min="0.5" max="24" step="0.5" value="1" required>
+        </label>
+      </div>
+      <label>Comment<textarea id="comment" rows="2" placeholder="Optional"></textarea></label>
+      <button id="save" type="submit">Add worklog</button>
+    </form>
+    <form id="setupForm" class="setup-form" hidden>
+      <p class="setup-intro">Connect your Jira account to start logging work.</p>
+      <p class="token-help">Generate an API token in your
+        <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">Atlassian account settings</a>, then paste it below.
+      </p>
+      <label>Atlassian site
+        <input id="setupSite" type="text" placeholder="your-company.atlassian.net" required>
+      </label>
+      <label>Email
+        <input id="setupEmail" type="email" placeholder="your-email@example.com" required>
+      </label>
+      <label>API token
+        <input id="setupToken" type="password" placeholder="Paste your token" autocomplete="off" required>
+      </label>
+      <button id="connect" type="submit">Connect to Jira</button>
+    </form>
+  </main>
+  <script src="popup.js"></script>
+</body></html>

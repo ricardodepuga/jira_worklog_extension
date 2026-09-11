@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>JiraLogWork</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>JiraLogWork</h1>
+
+    <div class="controls">
+      <div class="controls-left">
+        <div class="user-picker">
+          <input id="userInput" type="text" autocomplete="off" placeholder="Name or email..." aria-label="User" />
+          <div id="userSuggestions" class="suggestions hidden"></div>
+        </div>
+
+        <div class="view-toggle">
+          <button id="viewMonthBtn" class="toggle-btn active">Month</button>
+          <button id="viewWeekBtn" class="toggle-btn">Week</button>
+        </div>
+
+        <div class="nav">
+          <button id="prevBtn" title="Previous">‹</button>
+          <button id="todayBtn">Today</button>
+          <button id="nextBtn" title="Next">›</button>
+        </div>
+
+        <div id="periodLabel" class="period-label"></div>
+      </div>
+
+      <div class="options-group">
+        <div class="checkbox-group">
+          <label class="option-checkbox" id="weekendsToggleLabel">
+            <input id="showWeekendsInput" type="checkbox" />
+            Show weekends
+          </label>
+
+          <label class="option-checkbox" id="autoLogToggleLabel">
+            <input id="autoLogInput" type="checkbox" />
+            Auto worklog
+            <span class="info-icon" id="autoLogInfoIcon" tabindex="0" role="button" aria-label="What does this do?">
+              ⓘ
+              <div class="info-popup" id="autoLogInfoPopup">
+                Daily at 18:00, auto-fills empty workdays by splitting your expected
+                hours across your in-progress Jira issues. Skips weekends and days
+                already logged. Marked "auto" so you can spot them later.
+              </div>
+            </span>
+          </label>
+        </div>
+
+        <label class="expected-hours">
+          Expected hours/day
+          <input id="expectedHoursInput" type="number" min="0.5" max="24" step="0.5" value="7" />
+        </label>
+
+        <div class="data-actions">
+          <button type="button" id="manageCredentialsBtn" class="export-btn icon-btn" title="Jira connection" aria-label="Manage Jira connection">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 14.5 5 17a3 3 0 0 0 4.24 4.24l3.26-3.26a3 3 0 0 0 0-4.24"/><path d="m16.5 9.5 2.5-2.5a3 3 0 0 0-4.24-4.24L11.5 6.02a3 3 0 0 0 0 4.24"/><path d="m9 15 6-6"/></svg>
+          </button>
+          <button type="button" id="exportDataBtn" class="export-btn icon-btn" title="Export data" aria-label="Export data">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+          </button>
+          <button type="button" id="importDataBtn" class="export-btn icon-btn" title="Import data" aria-label="Import data">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 3h14"/></svg>
+          </button>
+          <input type="file" id="importDataInput" accept="application/json" hidden />
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="statusBar" class="status-bar hidden"></div>
+    <div id="calendarWeekdays" class="calendar-weekdays"></div>
+    <div id="calendarGrid" class="calendar-grid"></div>
+
+    <section id="summaryPanel" class="summary-panel">
+      <h2>Period summary</h2>
+      <div id="summaryContent"></div>
+    </section>
+  </main>
+
+  <dialog id="dayDialog" class="day-dialog">
+    <form method="dialog">
+      <header>
+        <h3 id="dayDialogTitle"></h3>
+        <button class="close-btn" value="close" aria-label="Close">✕</button>
+      </header>
+      <div id="dayDialogBody"></div>
+    </form>
+  </dialog>
+
+  <dialog id="setupDialog" class="setup-dialog">
+    <form id="setupForm">
+      <header>
+        <h3 id="setupDialogTitle">Connect to Jira</h3>
+        <button type="button" id="setupCloseBtn" class="close-btn hidden" aria-label="Close">✕</button>
+      </header>
+      <div class="setup-body">
+        <p class="setup-intro" id="setupIntro">
+          No saved API token found. Generate one at
+          <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">id.atlassian.com/manage-profile/security/api-tokens</a>
+          and paste it below.
+        </p>
+        <label>Atlassian site
+          <input id="setupSite" type="text" placeholder="your-company.atlassian.net" required />
+        </label>
+        <label>Email
+          <input id="setupEmail" type="email" placeholder="your-email@example.com" required />
+        </label>
+        <label>API Token
+          <input id="setupToken" type="password" placeholder="paste the token here" required autocomplete="off" />
+        </label>
+        <div id="setupError" class="setup-error hidden"></div>
+        <div class="setup-actions">
+          <button type="button" id="deleteCredentialsBtn" class="danger hidden">Remove credentials</button>
+          <button type="submit" id="setupSubmit">Connect</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="calendar.js"></script>
+</body>
+</html>
