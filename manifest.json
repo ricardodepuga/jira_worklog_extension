@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JiraLogWork",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Quick Jira worklogs and a full calendar view.",
   "permissions": ["storage", "alarms"],
   "host_permissions": ["https://*.atlassian.net/*", "https://date.nager.at/*"],

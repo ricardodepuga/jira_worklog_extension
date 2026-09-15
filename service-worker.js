@@ -1,5 +1,5 @@
 const DEFAULTS = {
-  config: { site: '', email: '', apiToken: '', displayOffset: '+0300' },
+  config: { site: '', email: '', apiToken: '' },
   settings: { autoLogEnabled: false, expectedHours: 7, lastAutoLogDate: null, allowUserSwitch: false, holidayCountry: '', holidayMode: 'mark', morningStart: '09:00', afternoonStart: '14:00' },
   me: null,
   oofByAccount: {},
@@ -140,7 +140,7 @@ async function excludedHolidayForDate(date) {
 async function resolveMe() {
   const data = await jiraFetch('/myself');
   const { config } = await stored();
-  const me = { accountId: data.accountId, displayName: data.displayName, email: data.emailAddress || config.email };
+  const me = { accountId: data.accountId, displayName: data.displayName, email: data.emailAddress || config.email, timeZone: data.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone };
   await chrome.storage.local.set({ me });
   return me;
 }
@@ -251,10 +251,60 @@ async function readableAccount(accountId) {
   return requested;
 }
 
+function effectiveTimeZone(timeZone) {
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone }).format();
+    return timeZone;
+  } catch (_) {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  }
+}
+
+function zonedParts(instant, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: effectiveTimeZone(timeZone), year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(instant));
+  const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+  return { year: value('year'), month: value('month'), day: value('day'), hour: value('hour'), minute: value('minute'), second: value('second') };
+}
+
+function instantForZonedDateTime(date, time, timeZone) {
+  const [year, month, day] = date.split('-').map(Number);
+  const [hour, minute] = time.split(':').map(Number);
+  const desired = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  let instant = desired;
+  // Resolve the wall-clock time against the selected IANA time zone, including DST.
+  for (let i = 0; i < 2; i += 1) {
+    const actual = zonedParts(instant, timeZone);
+    const actualAsUtc = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, actual.second);
+    instant = desired - (actualAsUtc - instant);
+  }
+  return instant;
+}
+
+function offsetAtZonedDateTime(date, time, timeZone) {
+  const [year, month, day] = date.split('-').map(Number);
+  const [hour, minute] = time.split(':').map(Number);
+  return Math.round((Date.UTC(year, month - 1, day, hour, minute) - instantForZonedDateTime(date, time, timeZone)) / 60000);
+}
+
+function formatOffset(minutes) {
+  const sign = minutes >= 0 ? '+' : '-';
+  const absolute = Math.abs(minutes);
+  return `${sign}${String(Math.floor(absolute / 60)).padStart(2, '0')}${String(absolute % 60).padStart(2, '0')}`;
+}
+
+function dateAndMinutesInTimeZone(iso, timeZone) {
+  const value = zonedParts(new Date(iso).getTime(), timeZone);
+  return { date: `${value.year}-${String(value.month).padStart(2, '0')}-${String(value.day).padStart(2, '0')}`, minutes: value.hour * 60 + value.minute };
+}
+
 async function buildStarted(date, time) {
-  const { config, settings } = await stored();
+  const { settings, me } = await stored();
   const hhmm = /^\d{2}:\d{2}$/.test(time || '') ? time : settings.morningStart;
-  return `${date}T${hhmm}:00.000${config.displayOffset || '+0300'}`;
+  const timeZone = effectiveTimeZone(me?.timeZone);
+  return `${date}T${hhmm}:00.000${formatOffset(offsetAtZonedDateTime(date, hhmm, timeZone))}`;
 }
 
 async function createWorklog(issueKey, date, time, seconds, comment) {
@@ -301,14 +351,12 @@ async function fetchIssueChangelog(issueKey) {
 }
 
 async function wasEligibleAtEndOfDay(issue, date, accountId) {
-  const [{ config }, statuses, histories] = await Promise.all([
+  const [state, statuses, histories] = await Promise.all([
     stored(),
     getJiraStatuses(),
     fetchIssueChangelog(issue.key),
   ]);
-  const rawOffset = config.displayOffset || '+0000';
-  const offset = /^[+-]\d{4}$/.test(rawOffset) ? `${rawOffset.slice(0, 3)}:${rawOffset.slice(3)}` : rawOffset;
-  const cutoff = new Date(`${date}T23:59:59.999${offset}`).getTime();
+  const cutoff = instantForZonedDateTime(date, '23:59', effectiveTimeZone(state.me?.timeZone)) + 59999;
   let statusId = issue.fields?.status?.id || null;
   let statusName = issue.fields?.status?.name || null;
   let assigneeId = issue.fields?.assignee?.accountId || null;
@@ -395,7 +443,7 @@ async function handleApi(path, options = {}) {
   const state = await stored();
   if (url.pathname === '/api/config/status') return { configured: Boolean(state.config.site && state.config.email && state.config.apiToken), site: state.config.site || null, email: state.config.email || null };
   if (url.pathname === '/api/config' && options.method === 'POST') {
-    const candidate = { site: cleanSite(body.site), email: String(body.email || '').trim(), apiToken: String(body.apiToken || '').trim(), displayOffset: body.displayOffset || state.config.displayOffset };
+    const candidate = { site: cleanSite(body.site), email: String(body.email || '').trim(), apiToken: String(body.apiToken || '').trim() };
     if (!candidate.site || !candidate.email || !candidate.apiToken) throw new Error('Fill in site, email and API token.');
     validateSite(candidate.site);
     const previous = state.config;
@@ -478,21 +526,6 @@ function splitUnits(total, count) {
   return Array.from({ length: count }, (_, i) => base + (i < remainder ? 1 : 0));
 }
 
-function offsetMinutes(offset) {
-  const match = /^([+-])(\d{2}):?(\d{2})$/.exec(offset || '');
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3]);
-  return match[1] === '-' ? -minutes : minutes;
-}
-
-function dateAndMinutesAtOffset(iso, offset) {
-  const shifted = new Date(new Date(iso).getTime() + offsetMinutes(offset) * 60000);
-  return {
-    date: `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`,
-    minutes: shifted.getUTCHours() * 60 + shifted.getUTCMinutes(),
-  };
-}
-
 function minutesToTime(minutes) {
   const safe = Math.max(0, Math.min(1439, Math.round(minutes)));
   return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
@@ -503,12 +536,12 @@ function timeToMinutes(hhmm) {
   return match ? Number(match[1]) * 60 + Number(match[2]) : 9 * 60;
 }
 
-async function reviewTransitionMinute(issue, date, displayOffset) {
+async function reviewTransitionMinute(issue, date, timeZone) {
   if (!/review/i.test(issue.status)) return null;
   const histories = await fetchIssueChangelog(issue.key);
   const transitions = [];
   for (const history of histories) {
-    const local = dateAndMinutesAtOffset(history.created, displayOffset);
+    const local = dateAndMinutesInTimeZone(history.created, timeZone);
     if (local.date !== date) continue;
     if ((history.items || []).some((item) => String(item.field).toLowerCase() === 'status' && /review/i.test(item.toString || ''))) {
       transitions.push(local.minutes);
@@ -517,12 +550,12 @@ async function reviewTransitionMinute(issue, date, displayOffset) {
   return transitions.length ? Math.min(...transitions) : null;
 }
 
-async function autoPlan(issues, hours, date, displayOffset, morningStart) {
+async function autoPlan(issues, hours, date, timeZone, morningStart) {
   let remainingUnits = Math.round(hours * 2);
   if (!issues.length || !remainingUnits) return [];
   const enriched = await Promise.all(issues.map(async (issue) => ({
     ...issue,
-    reviewMinute: await reviewTransitionMinute(issue, date, displayOffset),
+    reviewMinute: await reviewTransitionMinute(issue, date, timeZone),
   })));
   const reviewed = enriched.filter((issue) => issue.reviewMinute !== null).sort((a, b) => a.reviewMinute - b.reviewMinute);
   const ongoing = enriched.filter((issue) => issue.reviewMinute === null);
@@ -558,7 +591,7 @@ async function runAutoLog() {
   const existing = await getWorklogs(state.me.accountId, date, date);
   if ((existing.byDate[date] || []).length) return;
   const inProgress = await inProgressIssues(state.me.accountId);
-  const plan = await autoPlan(inProgress, state.settings.expectedHours, date, state.config.displayOffset, state.settings.morningStart);
+  const plan = await autoPlan(inProgress, state.settings.expectedHours, date, effectiveTimeZone(state.me?.timeZone), state.settings.morningStart);
   for (const item of plan) {
     // The user may disable auto-log while Jira queries are still in flight.
     // Re-check immediately before every external write.
