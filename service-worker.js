@@ -1,6 +1,6 @@
 const DEFAULTS = {
   config: { site: '', email: '', apiToken: '', displayOffset: '+0300' },
-  settings: { autoLogEnabled: false, expectedHours: 7, lastAutoLogDate: null, allowUserSwitch: false },
+  settings: { autoLogEnabled: false, expectedHours: 7, lastAutoLogDate: null, allowUserSwitch: false, holidayCountry: '', holidayMode: 'mark', morningStart: '09:00', afternoonStart: '14:00' },
   me: null,
   oofByAccount: {},
 };
@@ -59,6 +59,23 @@ function updateSettings(patch) {
       }
       settings.expectedHours = n;
     }
+    if (patch.holidayCountry !== undefined) {
+      const country = String(patch.holidayCountry || '').trim().toUpperCase();
+      if (country && !/^[A-Z]{2}$/.test(country)) throw new Error('Choose a valid holiday country.');
+      settings.holidayCountry = country;
+    }
+    if (patch.holidayMode !== undefined) {
+      // "block" is accepted only as a migration from v1.3.0; manual
+      // worklogs are never blocked by a holiday setting.
+      if (!['mark', 'exclude', 'block'].includes(patch.holidayMode)) throw new Error('Choose a valid holiday mode.');
+      settings.holidayMode = patch.holidayMode === 'block' ? 'exclude' : patch.holidayMode;
+    }
+    for (const key of ['morningStart', 'afternoonStart']) {
+      if (patch[key] === undefined) continue;
+      const time = String(patch[key]);
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('Working-period start times must use HH:MM.');
+      settings[key] = time;
+    }
     await chrome.storage.local.set({ settings });
     return settings;
   });
@@ -95,6 +112,31 @@ async function jiraFetch(pathname, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
+const holidayCache = new Map();
+async function holidaysForYear(country, year) {
+  if (!country) return [];
+  const key = `${country}:${year}`;
+  if (!holidayCache.has(key)) {
+    holidayCache.set(key, fetch(`https://date.nager.at/api/v3/PublicHolidays/${year}/${encodeURIComponent(country)}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Holiday calendar ${response.status}.`);
+        const holidays = await response.json();
+        // The country setting represents national public holidays; regional
+        // entries from the provider must not block every user in that country.
+        return holidays.filter((holiday) => holiday.global !== false);
+      })
+      .catch((error) => { holidayCache.delete(key); throw error; }));
+  }
+  return holidayCache.get(key);
+}
+
+async function excludedHolidayForDate(date) {
+  const { settings } = await stored();
+  if (!['exclude', 'block'].includes(settings.holidayMode) || !settings.holidayCountry || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const holidays = await holidaysForYear(settings.holidayCountry, date.slice(0, 4));
+  return holidays.find((holiday) => holiday.date === date) || null;
+}
+
 async function resolveMe() {
   const data = await jiraFetch('/myself');
   const { config } = await stored();
@@ -129,11 +171,13 @@ function parseAutoMarker(text) {
 async function findIssuesWithWorklogs(accountId, start, end) {
   const jql = `worklogAuthor = "${accountId}" AND worklogDate >= "${start}" AND worklogDate <= "${end}" ORDER BY updated DESC`;
   const issues = [];
+  const storyPointsFieldId = await getStoryPointsFieldId();
+  const fields = ['summary', 'project', 'timeoriginalestimate', 'timeestimate', ...(storyPointsFieldId ? [storyPointsFieldId] : [])];
   let nextPageToken;
   do {
     const data = await jiraFetch('/search/jql', {
       method: 'POST',
-      body: JSON.stringify({ jql, fields: ['summary', 'project'], maxResults: 100, ...(nextPageToken ? { nextPageToken } : {}) }),
+      body: JSON.stringify({ jql, fields, maxResults: 100, ...(nextPageToken ? { nextPageToken } : {}) }),
     });
     issues.push(...(data.issues || []));
     nextPageToken = data.nextPageToken;
@@ -174,6 +218,9 @@ async function getWorklogs(accountId, start, end) {
         worklogId: worklog.id,
         started: worklog.started,
         taskTotalToDateSeconds: own.filter((w) => w.day <= worklog.day).reduce((sum, w) => sum + w.timeSpentSeconds, 0),
+        storyPoints: storyPointsFieldId ? issue.fields?.[storyPointsFieldId] ?? null : null,
+        originalEstimateSeconds: issue.fields?.timeoriginalestimate ?? null,
+        remainingEstimateSeconds: issue.fields?.timeestimate ?? null,
       });
     }
   }
@@ -205,8 +252,8 @@ async function readableAccount(accountId) {
 }
 
 async function buildStarted(date, time) {
-  const { config } = await stored();
-  const hhmm = /^\d{2}:\d{2}$/.test(time || '') ? time : '09:00';
+  const { config, settings } = await stored();
+  const hhmm = /^\d{2}:\d{2}$/.test(time || '') ? time : settings.morningStart;
   return `${date}T${hhmm}:00.000${config.displayOffset || '+0300'}`;
 }
 
@@ -217,40 +264,129 @@ async function createWorklog(issueKey, date, time, seconds, comment) {
   });
 }
 
-const DONE = ['Done', 'Closed', 'Resolved', 'Cancelled', "Won't Do", 'Rejected'];
 function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-async function searchIssues(accountId, date) {
+let jiraStatusesPromise;
+async function getJiraStatuses() {
+  if (!jiraStatusesPromise) jiraStatusesPromise = jiraFetch('/status');
+  return jiraStatusesPromise;
+}
+
+async function getInProgressStatusNames() {
+  const statuses = await getJiraStatuses();
+  return [...new Set(statuses
+    .filter((status) => status.statusCategory?.name === 'In Progress')
+    .map((status) => status.name)
+  )];
+}
+
+function quoteJqlValue(value) {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+async function fetchIssueChangelog(issueKey) {
+  const histories = [];
+  let startAt = 0;
+  for (;;) {
+    const page = await jiraFetch(`/issue/${encodeURIComponent(issueKey)}/changelog?startAt=${startAt}&maxResults=100`);
+    const values = page.values || page.histories || [];
+    histories.push(...values);
+    if (startAt + (page.maxResults || values.length) >= page.total || !values.length) break;
+    startAt += page.maxResults || values.length;
+  }
+  return histories;
+}
+
+async function wasEligibleAtEndOfDay(issue, date, accountId) {
+  const [{ config }, statuses, histories] = await Promise.all([
+    stored(),
+    getJiraStatuses(),
+    fetchIssueChangelog(issue.key),
+  ]);
+  const rawOffset = config.displayOffset || '+0000';
+  const offset = /^[+-]\d{4}$/.test(rawOffset) ? `${rawOffset.slice(0, 3)}:${rawOffset.slice(3)}` : rawOffset;
+  const cutoff = new Date(`${date}T23:59:59.999${offset}`).getTime();
+  let statusId = issue.fields?.status?.id || null;
+  let statusName = issue.fields?.status?.name || null;
+  let assigneeId = issue.fields?.assignee?.accountId || null;
+  const ordered = histories.slice().sort((a, b) => new Date(b.created) - new Date(a.created));
+  for (const history of ordered) {
+    if (new Date(history.created).getTime() <= cutoff) continue;
+    for (const item of history.items || []) {
+      if (String(item.field).toLowerCase() !== 'status') continue;
+      statusId = item.from || null;
+      statusName = item.fromString || null;
+    }
+    for (const item of history.items || []) {
+      if (String(item.field).toLowerCase() !== 'assignee') continue;
+      assigneeId = item.from || null;
+    }
+  }
+  const status = statuses.find((candidate) =>
+    (statusId && String(candidate.id) === String(statusId)) ||
+    (!statusId && statusName && candidate.name === statusName)
+  );
+  return status?.statusCategory?.name === 'In Progress' && assigneeId === accountId;
+}
+
+async function searchIssues(accountId, date, query = '') {
   const historical = /^\d{4}-\d{2}-\d{2}$/.test(date) && date < todayStr();
-  const done = DONE.map((s) => `"${s}"`).join(',');
-  const jql = historical
-    ? `assignee WAS "${accountId}" ON "${date}" AND status WAS NOT IN (${done}) ON "${date}" ORDER BY updated DESC`
-    : `assignee = "${accountId}" AND statusCategory != Done ORDER BY updated DESC`;
-  const data = await jiraFetch('/search/jql', { method: 'POST', body: JSON.stringify({ jql, fields: ['summary', 'status', 'project'], maxResults: 25 }) });
-  return (data.issues || []).map((i) => ({ key: i.key, summary: i.fields?.summary || '', status: i.fields?.status?.name || '', projectKey: i.fields?.project?.key || '' }));
+  let jql;
+  if (historical) {
+    // Do not pre-filter historical status through JQL. That index can miss
+    // unchanged/renamed statuses; the changelog below is the source of truth.
+    jql = `assignee WAS "${accountId}" ON "${date}" ORDER BY updated DESC`;
+  } else {
+    jql = `assignee = "${accountId}" AND statusCategory = "In Progress" ORDER BY updated DESC`;
+  }
+  const q = query.trim();
+  if (q) {
+    const escaped = q.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const filter = /^[A-Za-z][A-Za-z0-9]+-\d*$/.test(q)
+      ? `(key = "${q.toUpperCase()}" OR summary ~ "${escaped}*")`
+      : `summary ~ "${escaped}*"`;
+    jql = jql.replace(' ORDER BY updated DESC', ` AND ${filter} ORDER BY updated DESC`);
+  }
+  const data = await jiraFetch('/search/jql', { method: 'POST', body: JSON.stringify({ jql, fields: ['summary', 'status', 'project', 'assignee'], maxResults: 100 }) });
+  const candidates = data.issues || [];
+  const issues = historical
+    ? (await Promise.all(candidates.map(async (issue) => ({ issue, eligible: await wasEligibleAtEndOfDay(issue, date, accountId) })))).filter((result) => result.eligible).map((result) => result.issue)
+    : candidates;
+  return issues.map((i) => ({ key: i.key, summary: i.fields?.summary || '', status: i.fields?.status?.name || '', projectKey: i.fields?.project?.key || '' }));
 }
 
 async function inProgressIssues(accountId) {
   const jql = `assignee = "${accountId}" AND statusCategory = "In Progress" ORDER BY updated DESC`;
   const data = await jiraFetch('/search/jql', {
     method: 'POST',
-    body: JSON.stringify({ jql, fields: ['summary'], maxResults: 50 }),
+    body: JSON.stringify({ jql, fields: ['summary', 'status'], maxResults: 50 }),
   });
-  return (data.issues || []).map((issue) => ({ key: issue.key, summary: issue.fields?.summary || '' }));
+  return (data.issues || []).map((issue) => ({ key: issue.key, summary: issue.fields?.summary || '', status: issue.fields?.status?.name || '' }));
 }
 
 let storyPointsFieldId;
-async function issueDetails(issueKey) {
+async function getStoryPointsFieldId() {
   if (storyPointsFieldId === undefined) {
     const fields = await jiraFetch('/field');
-    storyPointsFieldId = fields.find((f) => /story point/i.test(f.name || ''))?.id || null;
+    storyPointsFieldId = fields.find((field) => /story point/i.test(field.name || ''))?.id || null;
   }
-  const wanted = ['timespent', ...(storyPointsFieldId ? [storyPointsFieldId] : [])];
+  return storyPointsFieldId;
+}
+
+async function issueDetails(issueKey) {
+  const storyPointsFieldId = await getStoryPointsFieldId();
+  const wanted = ['timespent', 'timeoriginalestimate', 'timeestimate', ...(storyPointsFieldId ? [storyPointsFieldId] : [])];
   const issue = await jiraFetch(`/issue/${encodeURIComponent(issueKey)}?fields=${wanted.join(',')}`);
-  return { key: issueKey, loggedSeconds: issue.fields?.timespent || 0, storyPoints: storyPointsFieldId ? issue.fields?.[storyPointsFieldId] ?? null : null };
+  return {
+    key: issueKey,
+    loggedSeconds: issue.fields?.timespent || 0,
+    storyPoints: storyPointsFieldId ? issue.fields?.[storyPointsFieldId] ?? null : null,
+    originalEstimateSeconds: issue.fields?.timeoriginalestimate ?? null,
+    remainingEstimateSeconds: issue.fields?.timeestimate ?? null,
+  };
 }
 
 async function handleApi(path, options = {}) {
@@ -276,6 +412,12 @@ async function handleApi(path, options = {}) {
   if (url.pathname === '/api/settings' && options.method === 'POST') {
     const settings = await updateSettings(body);
     return { ok: true, ...settings };
+  }
+  if (url.pathname === '/api/holidays') {
+    const country = state.settings.holidayCountry;
+    const year = Number(url.searchParams.get('year'));
+    if (!country || !Number.isInteger(year) || year < 1900 || year > 2100) return [];
+    return holidaysForYear(country, year);
   }
   if (url.pathname === '/api/users/search') {
     if (!state.settings.allowUserSwitch) throw new Error('Viewing other users is disabled.');
@@ -314,10 +456,8 @@ async function handleApi(path, options = {}) {
   if (url.pathname === '/api/issues/search') {
     const q = (url.searchParams.get('q') || '').trim();
     if (q.length < 2) return [];
-    const escaped = q.replace(/"/g, '\\"');
-    const jql = /^[A-Za-z][A-Za-z0-9]+-\d*$/.test(q) ? `key = "${q.toUpperCase()}" OR summary ~ "${escaped}*" ORDER BY updated DESC` : `summary ~ "${escaped}*" ORDER BY updated DESC`;
-    const data = await jiraFetch('/search/jql', { method: 'POST', body: JSON.stringify({ jql, fields: ['summary', 'status', 'project'], maxResults: 15 }) });
-    return (data.issues || []).map((i) => ({ key: i.key, summary: i.fields?.summary || '', status: i.fields?.status?.name || '', projectKey: i.fields?.project?.key || '' }));
+    const accountId = await readableAccount(url.searchParams.get('accountId'));
+    return searchIssues(accountId, url.searchParams.get('date'), q);
   }
   const detailMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/details$/);
   if (detailMatch) return issueDetails(decodeURIComponent(detailMatch[1]));
@@ -338,16 +478,74 @@ function splitUnits(total, count) {
   return Array.from({ length: count }, (_, i) => base + (i < remainder ? 1 : 0));
 }
 
-function autoPlan(issues, hours) {
-  const units = Math.round(hours * 2);
-  if (!issues.length || !units) return [];
-  if (issues.length === 1) return [{ issueKey: issues[0].key, time: '09:00', seconds: units * HALF_HOUR_SECONDS }];
-  const morningCount = Math.ceil(issues.length / 2);
-  const [amTotal, pmTotal] = splitUnits(units, 2);
-  return [
-    ...splitUnits(amTotal, morningCount).map((u, i) => ({ issueKey: issues[i].key, time: '09:00', seconds: u * HALF_HOUR_SECONDS })),
-    ...splitUnits(pmTotal, issues.length - morningCount).map((u, i) => ({ issueKey: issues[morningCount + i].key, time: '14:00', seconds: u * HALF_HOUR_SECONDS })),
-  ].filter((x) => x.seconds > 0);
+function offsetMinutes(offset) {
+  const match = /^([+-])(\d{2}):?(\d{2})$/.exec(offset || '');
+  if (!match) return 0;
+  const minutes = Number(match[2]) * 60 + Number(match[3]);
+  return match[1] === '-' ? -minutes : minutes;
+}
+
+function dateAndMinutesAtOffset(iso, offset) {
+  const shifted = new Date(new Date(iso).getTime() + offsetMinutes(offset) * 60000);
+  return {
+    date: `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`,
+    minutes: shifted.getUTCHours() * 60 + shifted.getUTCMinutes(),
+  };
+}
+
+function minutesToTime(minutes) {
+  const safe = Math.max(0, Math.min(1439, Math.round(minutes)));
+  return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+}
+
+function timeToMinutes(hhmm) {
+  const match = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+  return match ? Number(match[1]) * 60 + Number(match[2]) : 9 * 60;
+}
+
+async function reviewTransitionMinute(issue, date, displayOffset) {
+  if (!/review/i.test(issue.status)) return null;
+  const histories = await fetchIssueChangelog(issue.key);
+  const transitions = [];
+  for (const history of histories) {
+    const local = dateAndMinutesAtOffset(history.created, displayOffset);
+    if (local.date !== date) continue;
+    if ((history.items || []).some((item) => String(item.field).toLowerCase() === 'status' && /review/i.test(item.toString || ''))) {
+      transitions.push(local.minutes);
+    }
+  }
+  return transitions.length ? Math.min(...transitions) : null;
+}
+
+async function autoPlan(issues, hours, date, displayOffset, morningStart) {
+  let remainingUnits = Math.round(hours * 2);
+  if (!issues.length || !remainingUnits) return [];
+  const enriched = await Promise.all(issues.map(async (issue) => ({
+    ...issue,
+    reviewMinute: await reviewTransitionMinute(issue, date, displayOffset),
+  })));
+  const reviewed = enriched.filter((issue) => issue.reviewMinute !== null).sort((a, b) => a.reviewMinute - b.reviewMinute);
+  const ongoing = enriched.filter((issue) => issue.reviewMinute === null);
+  const plan = [];
+  let cursor = timeToMinutes(morningStart || '09:00');
+
+  for (const issue of reviewed) {
+    if (remainingUnits <= 0) break;
+    const availableUnits = Math.max(0, Math.floor((issue.reviewMinute - cursor) / 30));
+    const units = Math.min(availableUnits, remainingUnits);
+    if (units > 0) plan.push({ issueKey: issue.key, time: minutesToTime(cursor), seconds: units * HALF_HOUR_SECONDS });
+    remainingUnits -= units;
+    cursor = Math.max(cursor, issue.reviewMinute);
+  }
+
+  const shares = splitUnits(remainingUnits, ongoing.length);
+  ongoing.forEach((issue, index) => {
+    const units = shares[index] || 0;
+    if (units <= 0) return;
+    plan.push({ issueKey: issue.key, time: minutesToTime(cursor), seconds: units * HALF_HOUR_SECONDS });
+    cursor += units * 30;
+  });
+  return plan;
 }
 
 async function runAutoLog() {
@@ -356,10 +554,11 @@ async function runAutoLog() {
   const now = new Date();
   if (!state.settings.autoLogEnabled || !state.me || state.settings.lastAutoLogDate === date || now.getHours() < 18 || [0, 6].includes(now.getDay())) return;
   if ((state.oofByAccount[state.me.accountId] || []).includes(date)) return;
+  if (await excludedHolidayForDate(date)) return;
   const existing = await getWorklogs(state.me.accountId, date, date);
   if ((existing.byDate[date] || []).length) return;
   const inProgress = await inProgressIssues(state.me.accountId);
-  const plan = autoPlan(inProgress, state.settings.expectedHours);
+  const plan = await autoPlan(inProgress, state.settings.expectedHours, date, state.config.displayOffset, state.settings.morningStart);
   for (const item of plan) {
     // The user may disable auto-log while Jira queries are still in flight.
     // Re-check immediately before every external write.

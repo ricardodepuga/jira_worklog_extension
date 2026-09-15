@@ -42,6 +42,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  position: relative;
 }
 
 .controls-left {
@@ -124,6 +125,16 @@ body {
 .view-toggle, .nav {
   display: flex;
   gap: 4px;
+}
+
+.nav {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 0 0 1px var(--border), 0 5px 14px rgba(0,0,0,.18);
+  border-radius: 7px;
+  padding: 3px;
+  background: var(--panel-alt);
 }
 
 .toggle-btn, .nav button {
@@ -245,6 +256,13 @@ body {
   stroke-linejoin: round;
 }
 
+.header-actions .icon-btn { width: 42px; height: 42px; padding: 8px; }
+.header-actions .icon-btn svg { width: 25px; height: 25px; stroke-width: 1.7; }
+
+@media (max-width: 760px) {
+  .nav { position: static; transform: none; box-shadow: none; padding: 0; }
+}
+
 main {
   padding: 12px 24px;
   max-width: 1600px;
@@ -364,7 +382,10 @@ main {
   text-transform: uppercase;
 }
 .day-cell.selected { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; }
+.bulk-panel{position:fixed;right:20px;bottom:20px;z-index:50;width:min(440px,calc(100vw - 40px));max-height:70vh;overflow:auto;background:var(--panel);border:1px solid var(--warn);border-radius:10px;padding:14px;box-shadow:0 12px 35px rgba(0,0,0,.5)}.bulk-panel.hidden{display:none}.bulk-panel header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px}.bulk-panel h3{margin:0 0 3px;font-size:15px}.bulk-panel header span{font-size:11px;color:var(--muted)}.bulk-summary{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}.bulk-summary-row{padding:7px 9px;background:var(--panel-alt);border-radius:6px;font-size:11px;color:var(--muted)}.bulk-actions{display:flex;justify-content:flex-end;gap:8px}.bulk-actions.hidden{display:none}.bulk-actions button,.bulk-worklog-form button{border:1px solid var(--border);border-radius:6px;background:var(--panel-alt);color:var(--text);padding:7px 10px;cursor:pointer}.bulk-actions button.primary,.bulk-worklog-form button.primary{background:var(--accent);border-color:var(--accent);color:#05101f;font-weight:600}.bulk-worklog-form{display:flex;flex-direction:column;gap:10px}.bulk-worklog-form.hidden{display:none}.bulk-worklog-form label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted)}.bulk-worklog-form input,.bulk-worklog-form select,.bulk-worklog-form textarea{background:var(--panel-alt);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:7px;font:inherit}.bulk-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}.bulk-panel .form-error{margin:8px 0}
 .day-cell.oof { background: rgba(76,154,255,0.08); }
+.day-cell.holiday { background: rgba(255,171,0,0.07); }
+.day-cell.holiday-blocked { border-color: rgba(255,171,0,0.5); }
 
 .day-cell .date-num {
   font-size: 13px;
@@ -385,6 +406,31 @@ main {
 .hours-badge.bad { background: rgba(241,91,80,0.18); color: var(--bad); }
 .hours-badge.none { background: transparent; color: var(--muted); font-weight: 400; }
 .hours-badge.oof-badge { background: rgba(76,154,255,0.18); color: var(--accent); }
+.hours-badge.holiday-badge { background: rgba(255,171,0,0.18); color: var(--warn); font-size: 11px; }
+.holiday-settings { display: flex; align-items: end; gap: 8px; }
+.holiday-settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
+.holiday-settings select { background: var(--panel-alt); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px; font: inherit; }
+.holiday-note { margin: 0 0 12px; padding: 8px 10px; border-left: 3px solid var(--warn); background: rgba(255,171,0,0.1); border-radius: 4px; font-size: 12px; color: var(--text); }
+.holiday-note.blocked { border-left-color: var(--bad); background: rgba(241,91,80,0.1); }
+
+.settings-backdrop { position: fixed; inset: 0; z-index: 80; background: rgba(0,0,0,.45); }
+.settings-backdrop.hidden { display: none; }
+.settings-panel { position: fixed; z-index: 81; top: 0; right: 0; width: min(390px, 92vw); height: 100vh; background: var(--panel); border-left: 1px solid var(--border); box-shadow: -12px 0 32px rgba(0,0,0,.35); transform: translateX(100%); transition: transform .2s ease; display: flex; flex-direction: column; }
+.settings-panel.open { transform: translateX(0); }
+.settings-panel > header { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+.settings-panel h2 { margin: 0; font-size: 17px; }
+.settings-body { overflow-y: auto; padding: 8px 18px 24px; }
+.settings-section { padding: 16px 0; border-bottom: 1px solid var(--border); }
+.settings-section:last-child { border-bottom: 0; }
+.settings-section h3 { margin: 0 0 12px; font-size: 13px; color: var(--text); }
+.settings-section .checkbox-group { align-items: flex-start; flex-direction: column; gap: 12px; }
+.settings-section .expected-hours { margin-top: 14px; display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+.settings-section .expected-hours input, .working-periods input { width: 140px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px; font: inherit; }
+.working-periods { display: flex; gap: 12px; }
+.working-periods label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 12px; }
+.settings-section .holiday-settings { align-items: stretch; flex-direction: column; }
+.settings-section .holiday-settings select { width: 100%; }
+.settings-section .data-actions { justify-content: flex-start; }
 
 .day-cell .issue-list {
   overflow-y: auto;
@@ -562,6 +608,9 @@ main {
 .entry-row .issue-link:hover .issue-key { text-decoration: underline; }
 .entry-row .comment { color: var(--accent); font-size: 11px; font-style: italic; }
 .entry-row .task-total { color: var(--muted); font-size: 10px; }
+.entry-row .task-planning { color: var(--accent); font-size: 10px; }
+.entry-row .task-details { color: var(--muted); font-size: 10px; white-space: normal; }
+.entry-row .task-details .detail-value { color: var(--text); font-weight: 600; }
 .entry-row .entry-time-range { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .entry-row.overlaps .entry-time-range { color: var(--warn); font-weight: 600; }
 .entry-row .auto-tag {

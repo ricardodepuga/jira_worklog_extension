@@ -10,6 +10,18 @@ async function api(path, options = {}) {
 }
 $('calendar').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('calendar.html') });
 
+function formatTimeLabel(time) { return time.replace(/^0/, ''); }
+function applyWorkingPeriods(settings) {
+  const morning = settings.morningStart || '09:00';
+  const afternoon = settings.afternoonStart || '14:00';
+  const buttons = document.querySelectorAll('.time-quick-btn');
+  [[buttons[0], morning], [buttons[1], afternoon]].forEach(([button, time]) => {
+    button.dataset.time = time;
+    button.textContent = formatTimeLabel(time);
+  });
+  $('time').value = morning;
+}
+
 function showSetup() {
   document.body.className = 'is-setup';
   $('status').textContent = '';
@@ -38,7 +50,8 @@ document.querySelectorAll('.time-quick-btn').forEach((button) => {
 $('time').addEventListener('change', updateSuggestedHours);
 
 async function loadWorklogForm() {
-  const me = await api('/api/me');
+  const [me, settings] = await Promise.all([api('/api/me'), api('/api/settings')]);
+  applyWorkingPeriods(settings);
   const issues = await api(`/api/issues/open?accountId=${encodeURIComponent(me.accountId)}&date=${today()}`);
   $('setupForm').hidden = true;
   if (!issues.length) {

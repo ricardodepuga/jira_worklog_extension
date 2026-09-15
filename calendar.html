@@ -31,7 +31,23 @@
         <div id="periodLabel" class="period-label"></div>
       </div>
 
-      <div class="options-group">
+      <div class="header-actions">
+        <button type="button" id="settingsBtn" class="export-btn icon-btn" title="Settings" aria-label="Open settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.1 2.1-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56v.1h-3v-.1a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-2.1-2.1.06-.06A1.7 1.7 0 0 0 7.04 15a1.7 1.7 0 0 0-1.56-1.04h-.1v-3h.1A1.7 1.7 0 0 0 7.04 9.92 1.7 1.7 0 0 0 6.7 8.04l-.06-.06 2.1-2.1.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1.04-1.56v-.1h3v.1a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.1 2.1-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.04h.1v3h-.1A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <div id="settingsBackdrop" class="settings-backdrop hidden"></div>
+  <aside id="settingsPanel" class="settings-panel" aria-label="Settings" aria-hidden="true">
+    <header>
+      <h2>Settings</h2>
+      <button type="button" id="settingsCloseBtn" class="close-btn" aria-label="Close settings">✕</button>
+    </header>
+    <div class="settings-body">
+      <section class="settings-section">
+        <h3>Calendar</h3>
         <div class="checkbox-group">
           <label class="option-checkbox" id="weekendsToggleLabel">
             <input id="showWeekendsInput" type="checkbox" />
@@ -56,7 +72,56 @@
           Expected hours/day
           <input id="expectedHoursInput" type="number" min="0.5" max="24" step="0.5" value="7" />
         </label>
+      </section>
 
+      <section class="settings-section">
+        <h3>Working periods</h3>
+        <div class="working-periods">
+          <label>Morning starts<input id="morningStartInput" type="time" step="1800" value="09:00" /></label>
+          <label>Afternoon starts<input id="afternoonStartInput" type="time" step="1800" value="14:00" /></label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Public holidays</h3>
+        <div class="holiday-settings">
+          <label>Public holidays
+            <select id="holidayCountryInput">
+              <option value="">Off</option>
+              <option value="PT">Portugal</option>
+              <option value="ES">Spain</option>
+              <option value="GB">United Kingdom</option>
+              <option value="IE">Ireland</option>
+              <option value="FR">France</option>
+              <option value="DE">Germany</option>
+              <option value="IT">Italy</option>
+              <option value="NL">Netherlands</option>
+              <option value="BE">Belgium</option>
+              <option value="CH">Switzerland</option>
+              <option value="AT">Austria</option>
+              <option value="SE">Sweden</option>
+              <option value="NO">Norway</option>
+              <option value="DK">Denmark</option>
+              <option value="FI">Finland</option>
+              <option value="PL">Poland</option>
+              <option value="BR">Brazil</option>
+              <option value="US">United States</option>
+              <option value="CA">Canada</option>
+              <option value="AU">Australia</option>
+              <option value="IN">India</option>
+            </select>
+          </label>
+          <label>Holiday behaviour
+            <select id="holidayModeInput">
+              <option value="mark">Show only</option>
+              <option value="exclude">Exclude from auto-log and summaries</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Data and connection</h3>
         <div class="data-actions">
           <button type="button" id="manageCredentialsBtn" class="export-btn icon-btn" title="Jira connection" aria-label="Manage Jira connection">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 14.5 5 17a3 3 0 0 0 4.24 4.24l3.26-3.26a3 3 0 0 0 0-4.24"/><path d="m16.5 9.5 2.5-2.5a3 3 0 0 0-4.24-4.24L11.5 6.02a3 3 0 0 0 0 4.24"/><path d="m9 15 6-6"/></svg>
@@ -69,9 +134,9 @@
           </button>
           <input type="file" id="importDataInput" accept="application/json" hidden />
         </div>
-      </div>
+      </section>
     </div>
-  </header>
+  </aside>
 
   <main>
     <div id="statusBar" class="status-bar hidden"></div>
@@ -93,6 +158,34 @@
       <div id="dayDialogBody"></div>
     </form>
   </dialog>
+
+  <aside id="bulkPanel" class="bulk-panel hidden" aria-live="polite">
+    <header>
+      <div>
+        <h3>Bulk action</h3>
+        <span id="bulkCount"></span>
+      </div>
+      <button type="button" id="bulkCloseBtn" class="close-btn" aria-label="Clear selection">✕</button>
+    </header>
+    <div id="bulkSummary" class="bulk-summary"></div>
+    <div id="bulkError" class="form-error hidden"></div>
+    <div id="bulkActions" class="bulk-actions">
+      <button type="button" id="bulkOofBtn">Mark OOF</button>
+      <button type="button" id="bulkWorklogBtn" class="primary">Add worklog</button>
+    </div>
+    <div id="bulkWorklogForm" class="bulk-worklog-form hidden">
+      <label>Task<select id="bulkIssue"></select></label>
+      <div class="bulk-fields">
+        <label>Hours<input id="bulkHours" type="number" min="0.5" max="24" step="0.5" value="7"></label>
+        <label>Start<input id="bulkTime" type="time" step="1800" value="09:00"></label>
+      </div>
+      <label>Comment<textarea id="bulkComment" rows="2" placeholder="Optional"></textarea></label>
+      <div class="bulk-actions">
+        <button type="button" id="bulkCancelBtn">Cancel</button>
+        <button type="button" id="bulkSaveBtn" class="primary">Save for all days</button>
+      </div>
+    </div>
+  </aside>
 
   <dialog id="setupDialog" class="setup-dialog">
     <form id="setupForm">

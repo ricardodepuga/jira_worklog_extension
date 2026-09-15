@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="JiraLogWork">
+  <defs>
+    <linearGradient id="surface" x1="26" y1="18" x2="104" y2="111" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4c535f"/>
+      <stop offset="1" stop-color="#2d333d"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" fill="#2d333d"/>
+  <rect x="3" y="3" width="122" height="122" rx="28" fill="url(#surface)"/>
+  <path d="M39 82c7 10 18 16 31 16 21 0 38-17 38-38 0-10-4-19-10-26" fill="none" stroke="#dfe4eb" stroke-width="8" stroke-linecap="round"/>
+  <path d="M61 42v22l17 10" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="38" cy="45" r="7" fill="#aeb6c2"/>
+</svg>

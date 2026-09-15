@@ -5,14 +5,20 @@ const state = {
   anchor: new Date(),
   showWeekends: false, // only affects month view
   expectedHours: 7,
+  morningStart: '09:00',
+  afternoonStart: '14:00',
   jiraSite: null,
   byDate: {},
   monthByDate: {},
   selectedDate: null, // YYYY-MM-DD, drives the "week" summary block; defaults to today
+  selectedDates: new Set(), // Ctrl/Cmd-click adds or removes days from this selection
   selectedWeekByDate: {},
   refreshToken: 0, // prevents slower, older Jira responses replacing the latest view
   openIssuesCache: new Map(), // per-date cached suggestions, keyed by dateStr
   oofDates: new Set(), // dates marked as out-of-office for state.user
+  publicHolidays: new Map(), // YYYY-MM-DD -> { name, localName }
+  holidayCountry: '',
+  holidayMode: 'mark',
 };
 
 const OOF_STORAGE_KEY = 'logwork_oof_v1';
@@ -58,6 +64,14 @@ const els = {
   periodLabel: document.getElementById('periodLabel'),
   showWeekendsInput: document.getElementById('showWeekendsInput'),
   expectedHoursInput: document.getElementById('expectedHoursInput'),
+  morningStartInput: document.getElementById('morningStartInput'),
+  afternoonStartInput: document.getElementById('afternoonStartInput'),
+  settingsBtn: document.getElementById('settingsBtn'),
+  settingsCloseBtn: document.getElementById('settingsCloseBtn'),
+  settingsPanel: document.getElementById('settingsPanel'),
+  settingsBackdrop: document.getElementById('settingsBackdrop'),
+  holidayCountryInput: document.getElementById('holidayCountryInput'),
+  holidayModeInput: document.getElementById('holidayModeInput'),
   autoLogInput: document.getElementById('autoLogInput'),
   autoLogInfoIcon: document.getElementById('autoLogInfoIcon'),
   manageCredentialsBtn: document.getElementById('manageCredentialsBtn'),
@@ -71,6 +85,21 @@ const els = {
   dayDialog: document.getElementById('dayDialog'),
   dayDialogTitle: document.getElementById('dayDialogTitle'),
   dayDialogBody: document.getElementById('dayDialogBody'),
+  bulkPanel: document.getElementById('bulkPanel'),
+  bulkCount: document.getElementById('bulkCount'),
+  bulkSummary: document.getElementById('bulkSummary'),
+  bulkError: document.getElementById('bulkError'),
+  bulkActions: document.getElementById('bulkActions'),
+  bulkCloseBtn: document.getElementById('bulkCloseBtn'),
+  bulkOofBtn: document.getElementById('bulkOofBtn'),
+  bulkWorklogBtn: document.getElementById('bulkWorklogBtn'),
+  bulkWorklogForm: document.getElementById('bulkWorklogForm'),
+  bulkIssue: document.getElementById('bulkIssue'),
+  bulkHours: document.getElementById('bulkHours'),
+  bulkTime: document.getElementById('bulkTime'),
+  bulkComment: document.getElementById('bulkComment'),
+  bulkCancelBtn: document.getElementById('bulkCancelBtn'),
+  bulkSaveBtn: document.getElementById('bulkSaveBtn'),
   setupDialog: document.getElementById('setupDialog'),
   setupForm: document.getElementById('setupForm'),
   setupSite: document.getElementById('setupSite'),
@@ -94,6 +123,12 @@ function pad(n) { return n.toString().padStart(2, '0'); }
 function fmtDate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 function todayStr() { return fmtDate(new Date()); }
 function isWeekend(d) { const wd = d.getDay(); return wd === 0 || wd === 6; }
+function quickTimeButtonsHtml() {
+  const label = (time) => time.replace(/^0/, '');
+  return `<div class="time-quick-picks"><button type="button" class="time-quick-btn" data-time="${state.morningStart}">${label(state.morningStart)}</button><button type="button" class="time-quick-btn" data-time="${state.afternoonStart}">${label(state.afternoonStart)}</button></div>`;
+}
+function holidayForDate(dateStr) { return state.publicHolidays.get(dateStr) || null; }
+function isExcludedHoliday(dateStr) { return ['exclude', 'block'].includes(state.holidayMode) && Boolean(holidayForDate(dateStr)); }
 function mondayIndex(d) { return (d.getDay() + 6) % 7; }
 
 function startOfWeek(d) {
@@ -375,17 +410,23 @@ function renderGrid() {
       cells.push(`<div class="day-cell empty-slot"></div>`);
     } else {
       const isOof = state.oofDates.has(dateStr);
+      const holiday = holidayForDate(dateStr);
+      const excludedHoliday = isExcludedHoliday(dateStr);
       const cls = [
         'day-cell',
         weekend ? 'weekend' : '',
         isFuture ? 'future' : '',
         dateStr === today ? 'today' : '',
-        dateStr === state.selectedDate ? 'selected' : '',
+        state.selectedDates.has(dateStr) ? 'selected' : '',
         isOof ? 'oof' : '',
+        holiday ? 'holiday' : '',
+        excludedHoliday ? 'holiday-blocked' : '',
       ].filter(Boolean).join(' ');
 
       const badge = isOof
         ? `<span class="hours-badge oof-badge">OOF</span>`
+        : holiday
+          ? `<span class="hours-badge holiday-badge" title="${escapeHtml(holiday.localName || holiday.name)}">Holiday</span>`
         : entries.length || !weekend
           ? `<span class="hours-badge ${badgeClass(hours, state.expectedHours, weekend)}">${fmtHours(hours)}</span>`
           : `<span class="hours-badge none">—</span>`;
@@ -399,7 +440,7 @@ function renderGrid() {
       const moreChip = hiddenCount > 0 ? `<span class="chip chip-more">+${hiddenCount} more</span>` : '';
       const extra = `<div class="issue-list">${chipHtml || moreChip ? chipHtml + moreChip : (state.view === 'week' ? '<span class="chip" style="opacity:.5">No entries</span>' : '')}</div>`;
 
-      cells.push(`<div class="${cls}" data-date="${dateStr}">
+      cells.push(`<div class="${cls}" data-date="${dateStr}"${holiday ? ` title="${escapeHtml(holiday.localName || holiday.name)}"` : ''}>
         <div class="date-num">${cursor.getDate()}</div>
         ${extra}
         ${badge}
@@ -409,11 +450,23 @@ function renderGrid() {
   }
   els.calendarGrid.innerHTML = cells.join('');
   els.calendarGrid.querySelectorAll('.day-cell[data-date]').forEach((cell) => {
-    cell.addEventListener('click', async () => {
+    cell.addEventListener('click', async (event) => {
       const dateStr = cell.dataset.date;
-      state.selectedDate = dateStr;
+      if (event.ctrlKey || event.metaKey) {
+        if (state.selectedDates.has(dateStr)) state.selectedDates.delete(dateStr);
+        else state.selectedDates.add(dateStr);
+        if (!state.selectedDates.size) state.selectedDates.add(dateStr);
+      } else {
+        state.selectedDates = new Set([dateStr]);
+      }
+      state.selectedDate = state.selectedDates.has(dateStr)
+        ? dateStr
+        : Array.from(state.selectedDates).sort().at(-1);
       els.calendarGrid.querySelectorAll('.day-cell.selected').forEach((selected) => selected.classList.remove('selected'));
-      cell.classList.add('selected');
+      els.calendarGrid.querySelectorAll('.day-cell[data-date]').forEach((dayCell) => {
+        dayCell.classList.toggle('selected', state.selectedDates.has(dayCell.dataset.date));
+      });
+      renderBulkPanel();
       const selectedWeekByDate = await resolveSelectedWeekData();
       // Ignore a slower result if another day was selected meanwhile.
       if (state.selectedDate !== dateStr) return;
@@ -492,10 +545,130 @@ async function openDayDialog(dateStr) {
   }
 }
 
+function selectedDatesSorted() {
+  return Array.from(state.selectedDates).sort();
+}
+
+function renderBulkPanel() {
+  const dates = selectedDatesSorted();
+  const visible = dates.length > 1 && isOwnUser();
+  els.bulkPanel.classList.toggle('hidden', !visible);
+  if (!visible) return;
+  els.bulkCount.textContent = `${dates.length} days selected · Ctrl/Cmd-click to change`;
+  els.bulkSummary.replaceChildren(...dates.map((dateStr) => {
+    const entries = state.byDate[dateStr] || [];
+    const hours = fmtHours(secondsToHours(entries.reduce((sum, entry) => sum + entry.seconds, 0)));
+    const tasks = [...new Set(entries.map((entry) => entry.issueKey))].join(', ') || 'No worklogs';
+    const row = document.createElement('div');
+    row.className = 'bulk-summary-row';
+    row.textContent = `${dateStr} · ${hours} · ${tasks}${state.oofDates.has(dateStr) ? ' · OOF' : ''}`;
+    return row;
+  }));
+  els.bulkError.classList.add('hidden');
+}
+
+function clearBulkSelection() {
+  const keep = state.selectedDate || todayStr();
+  state.selectedDates = new Set([keep]);
+  els.bulkWorklogForm.classList.add('hidden');
+  els.bulkActions.classList.remove('hidden');
+  renderGrid();
+  renderBulkPanel();
+}
+
+els.bulkCloseBtn.addEventListener('click', clearBulkSelection);
+
+els.bulkOofBtn.addEventListener('click', async () => {
+  const dates = selectedDatesSorted();
+  const withWorklogs = dates.filter((dateStr) => (state.byDate[dateStr] || []).length > 0);
+  if (withWorklogs.length) {
+    els.bulkError.textContent = `OOF cannot be applied because these days already have worklogs: ${withWorklogs.join(', ')}`;
+    els.bulkError.classList.remove('hidden');
+    return;
+  }
+  els.bulkOofBtn.disabled = true;
+  try {
+    for (const dateStr of dates) await setOofDate(state.me.accountId, dateStr, true);
+    state.oofDates = await loadOofDates(state.me.accountId);
+    renderGrid();
+    renderSummary();
+    renderBulkPanel();
+  } finally {
+    els.bulkOofBtn.disabled = false;
+  }
+});
+
+els.bulkWorklogBtn.addEventListener('click', async () => {
+  const dates = selectedDatesSorted();
+  els.bulkError.classList.add('hidden');
+  els.bulkWorklogBtn.disabled = true;
+  try {
+    if (dates.some((dateStr) => state.oofDates.has(dateStr))) throw new Error('Remove OOF from the selected days before adding worklogs.');
+    const issueLists = await Promise.all(dates.map((dateStr) => api(`/api/issues/open?accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`)));
+    const keySignatures = issueLists.map((issues) => issues.map((issue) => issue.key).sort().join('|'));
+    if (!issueLists[0].length || !keySignatures.every((signature) => signature === keySignatures[0])) {
+      throw new Error('The selected days do not have the same in-progress tasks, so a common worklog cannot be applied.');
+    }
+    els.bulkIssue.replaceChildren(...issueLists[0].map((issue) => {
+      const option = document.createElement('option');
+      option.value = issue.key;
+      option.textContent = `${issue.key} — ${issue.summary}`;
+      option.dataset.summary = issue.summary;
+      return option;
+    }));
+    els.bulkHours.value = state.expectedHours;
+    els.bulkTime.value = state.morningStart;
+    els.bulkActions.classList.add('hidden');
+    els.bulkWorklogForm.classList.remove('hidden');
+  } catch (error) {
+    els.bulkError.textContent = error.message;
+    els.bulkError.classList.remove('hidden');
+  } finally {
+    els.bulkWorklogBtn.disabled = false;
+  }
+});
+
+els.bulkCancelBtn.addEventListener('click', () => {
+  els.bulkWorklogForm.classList.add('hidden');
+  els.bulkActions.classList.remove('hidden');
+});
+
+els.bulkSaveBtn.addEventListener('click', async () => {
+  const dates = selectedDatesSorted();
+  const hours = roundToHalfHour(Number(els.bulkHours.value));
+  if (!hours || hours <= 0) {
+    els.bulkError.textContent = 'Enter valid hours in 30-minute steps.';
+    els.bulkError.classList.remove('hidden');
+    return;
+  }
+  const selectedOption = els.bulkIssue.selectedOptions[0];
+  if (!selectedOption) return;
+  els.bulkSaveBtn.disabled = true;
+  let completed = 0;
+  try {
+    for (const dateStr of dates) {
+      await api('/api/worklogs', {
+        method: 'POST',
+        body: JSON.stringify({ accountId: state.me.accountId, issueKey: selectedOption.value, date: dateStr, time: els.bulkTime.value || state.morningStart, seconds: hours * 3600, comment: els.bulkComment.value || undefined }),
+      });
+      completed += 1;
+    }
+    clearBulkSelection();
+    await refresh();
+  } catch (error) {
+    els.bulkError.textContent = `${completed} of ${dates.length} days were saved. ${error.message}`;
+    els.bulkError.classList.remove('hidden');
+  } finally {
+    els.bulkSaveBtn.disabled = false;
+  }
+});
+
 function renderDayDialogBody(dateStr) {
   const entries = state.byDate[dateStr] || [];
   const own = isOwnUser();
   const isOof = state.oofDates.has(dateStr);
+  const holiday = holidayForDate(dateStr);
+  const excludedHoliday = isExcludedHoliday(dateStr);
 
   let html = '';
   // Never shown once the day has any logged task, or while the add-worklog
@@ -510,6 +683,11 @@ function renderDayDialogBody(dateStr) {
           Mark as Out of Office
         </label>
       </div>`;
+  }
+
+  if (holiday) {
+    const holidayName = escapeHtml(holiday.localName || holiday.name || 'Public holiday');
+    html += `<div class="holiday-note${excludedHoliday ? ' blocked' : ''}">${holidayName}${excludedHoliday ? ' — excluded from auto-log and summary calculations.' : ' — worklogs are still allowed.'}</div>`;
   }
 
   if (!entries.length) {
@@ -567,6 +745,11 @@ function timeToMinutes(hhmm) {
 
 function entryRowHtml(e, overlaps) {
   const taskTotalHours = e.taskTotalToDateSeconds != null ? fmtHours(secondsToHours(e.taskTotalToDateSeconds)) : null;
+  const taskDetails = [];
+  if (taskTotalHours) taskDetails.push(`Task total to date: <strong class="detail-value">${taskTotalHours}</strong>`);
+  if (e.storyPoints !== null && e.storyPoints !== undefined) taskDetails.push(`Story points: <strong class="detail-value">${escapeHtml(String(e.storyPoints))}</strong>`);
+  if (Number(e.originalEstimateSeconds) > 0) taskDetails.push(`Estimate: <strong class="detail-value">${fmtHours(secondsToHours(e.originalEstimateSeconds))}</strong>`);
+  if (Number(e.remainingEstimateSeconds) > 0) taskDetails.push(`Remaining: <strong class="detail-value">${fmtHours(secondsToHours(e.remainingEstimateSeconds))}</strong>`);
   const issueUrl = jiraIssueUrl(e.issueKey);
   const issueLinkOpen = issueUrl ? `<a class="issue-link" href="${issueUrl}" target="_blank" rel="noopener" title="Open ${escapeHtml(e.issueKey)} in Jira">` : '<span class="issue-link">';
   const issueLinkClose = issueUrl ? '</a>' : '</span>';
@@ -579,7 +762,7 @@ function entryRowHtml(e, overlaps) {
       <span class="entry-time-range"${overlaps ? ' title="Overlaps with another worklog this day"' : ''}>${startTime}–${endTime}</span>
       ${e.autoLogged ? `<span class="auto-tag" title="Created automatically by the auto-logwork scheduler">auto</span>` : ''}
       ${e.comment ? `<span class="comment">${escapeHtml(e.comment)}</span>` : ''}
-      ${taskTotalHours ? `<span class="task-total">Task total to date: ${taskTotalHours}</span>` : ''}
+      ${taskDetails.length ? `<span class="task-details">${taskDetails.join(' · ')}</span>` : ''}
     </div>
     <span class="time">${fmtHours(secondsToHours(e.seconds))}</span>
     ${isOwnUser() ? `<div class="entry-actions">
@@ -641,10 +824,7 @@ function startEditEntry(row, dateStr) {
         <input type="number" min="0.5" step="0.5" value="${hours}" required />
       </label>
       <label>Start time
-        <div class="time-quick-picks">
-          <button type="button" class="time-quick-btn" data-time="09:00">9:00</button>
-          <button type="button" class="time-quick-btn" data-time="14:00">14:00</button>
-        </div>
+        ${quickTimeButtonsHtml()}
         <input type="time" value="${time}" required />
       </label>
       <label>Comment (optional)
@@ -747,11 +927,8 @@ function wireAddEntryForm(dateStr) {
         <input type="number" id="addHoursInput" min="0.5" step="0.5" value="${state.expectedHours}" required />
       </label>
       <label>Start time
-        <div class="time-quick-picks">
-          <button type="button" class="time-quick-btn" data-time="09:00">9:00</button>
-          <button type="button" class="time-quick-btn" data-time="14:00">14:00</button>
-        </div>
-        <input type="time" id="addTimeInput" value="09:00" required />
+        ${quickTimeButtonsHtml()}
+        <input type="time" id="addTimeInput" value="${state.morningStart}" required />
       </label>
       <label>Comment (optional)
         <textarea id="addCommentInput" placeholder="What did you work on..."></textarea>
@@ -853,7 +1030,7 @@ function wireAddEntryForm(dateStr) {
       }
       searchDebounce2 = setTimeout(async () => {
         try {
-          const results = await api(`/api/issues/search?q=${encodeURIComponent(q)}`);
+          const results = await api(`/api/issues/search?q=${encodeURIComponent(q)}&accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`);
           renderIssueOptions(openIssues, results);
         } catch (err) {
           console.error(err);
@@ -882,7 +1059,7 @@ function wireAddEntryForm(dateStr) {
         errorEl.classList.remove('hidden');
         return;
       }
-      const time = document.getElementById('addTimeInput').value || '09:00';
+      const time = document.getElementById('addTimeInput').value || state.morningStart;
       const comment = document.getElementById('addCommentInput').value;
       try {
         const seconds = Math.round(hours * 3600);
@@ -909,6 +1086,9 @@ function wireAddEntryForm(dateStr) {
           worklogId: result.worklogId,
           started: `${dateStr}T${time}:00.000`,
           taskTotalToDateSeconds: null,
+          storyPoints: null,
+          originalEstimateSeconds: null,
+          remainingEstimateSeconds: null,
         });
         els.dayDialog.close();
         renderGrid();
@@ -943,6 +1123,8 @@ function computeStats(dataMap, rangeStart, rangeEnd) {
       totalSeconds += seconds;
       if (!isWeekend(cursor)) {
         if (state.oofDates.has(dateStr)) {
+          oofCount += 1;
+        } else if (isExcludedHoliday(dateStr)) {
           oofCount += 1;
         } else {
           weekdaysConsidered += 1;
@@ -981,7 +1163,7 @@ function statsBlockHtml(title, stats) {
           </div>
           ${stats.oofCount > 0 ? `<div class="stat">
             <span class="value">${stats.oofCount}</span>
-            <span class="label">OOF days</span>
+            <span class="label">OOF / blocked holidays</span>
           </div>` : ''}
         </div>
       </div>
@@ -1046,10 +1228,24 @@ async function fetchWorklogRange(rangeStart, rangeEnd) {
   }
 }
 
+async function loadHolidaysForRange(rangeStart, rangeEnd) {
+  state.publicHolidays = new Map();
+  if (!state.holidayCountry) return;
+  const years = new Set();
+  for (let y = rangeStart.getFullYear(); y <= rangeEnd.getFullYear(); y += 1) years.add(y);
+  try {
+    const groups = await Promise.all([...years].map((year) => api(`/api/holidays?year=${year}`)));
+    for (const holiday of groups.flat()) state.publicHolidays.set(holiday.date, holiday);
+  } catch (error) {
+    setStatus(`Could not load public holidays: ${error.message}`, true);
+  }
+}
+
 async function refresh() {
   if (!state.user) return;
   const token = ++state.refreshToken;
   if (!state.selectedDate) state.selectedDate = todayStr();
+  if (!state.selectedDates.size) state.selectedDates.add(state.selectedDate);
   updatePeriodLabel();
   renderWeekdayHeader();
   state.oofDates = await loadOofDates(state.user.accountId);
@@ -1057,7 +1253,7 @@ async function refresh() {
 
   const { dataStart, dataEnd } = getRange();
   setStatus('Loading worklogs from Jira…');
-  const byDate = await fetchWorklogRange(dataStart, dataEnd);
+  const [byDate] = await Promise.all([fetchWorklogRange(dataStart, dataEnd), loadHolidaysForRange(dataStart, dataEnd)]);
   if (token !== state.refreshToken) return;
   state.byDate = byDate;
   setStatus('');
@@ -1075,6 +1271,7 @@ async function refresh() {
   els.calendarGrid.classList.remove('is-loading');
   renderGrid();
   renderSummary();
+  renderBulkPanel();
 }
 
 function updateWeekendsToggleAvailability() {
@@ -1112,6 +1309,7 @@ els.prevBtn.addEventListener('click', () => {
     target.setDate(Math.min(selectedDay, lastDay));
     state.anchor = target;
     state.selectedDate = fmtDate(target);
+    state.selectedDates = new Set([state.selectedDate]);
   }
   state.anchor = new Date(state.anchor);
   refresh();
@@ -1126,6 +1324,7 @@ els.nextBtn.addEventListener('click', () => {
     target.setDate(Math.min(selectedDay, lastDay));
     state.anchor = target;
     state.selectedDate = fmtDate(target);
+    state.selectedDates = new Set([state.selectedDate]);
   }
   state.anchor = new Date(state.anchor);
   refresh();
@@ -1134,6 +1333,7 @@ els.nextBtn.addEventListener('click', () => {
 els.todayBtn.addEventListener('click', () => {
   state.anchor = new Date();
   state.selectedDate = todayStr();
+  state.selectedDates = new Set([state.selectedDate]);
   refresh();
 });
 
@@ -1163,6 +1363,68 @@ els.autoLogInput.addEventListener('change', async () => {
     setStatus(`Could not update auto-log setting: ${err.message}`, true);
   }
 });
+
+function setSettingsPanelOpen(open) {
+  els.settingsPanel.classList.toggle('open', open);
+  els.settingsPanel.setAttribute('aria-hidden', String(!open));
+  els.settingsBackdrop.classList.toggle('hidden', !open);
+}
+
+els.settingsBtn.addEventListener('click', () => setSettingsPanelOpen(true));
+els.settingsCloseBtn.addEventListener('click', () => setSettingsPanelOpen(false));
+els.settingsBackdrop.addEventListener('click', () => setSettingsPanelOpen(false));
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && els.settingsPanel.classList.contains('open')) setSettingsPanelOpen(false);
+});
+
+async function saveWorkingPeriods() {
+  const previousMorning = state.morningStart;
+  const previousAfternoon = state.afternoonStart;
+  state.morningStart = els.morningStartInput.value || previousMorning;
+  state.afternoonStart = els.afternoonStartInput.value || previousAfternoon;
+  try {
+    await api('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ morningStart: state.morningStart, afternoonStart: state.afternoonStart }),
+    });
+  } catch (error) {
+    state.morningStart = previousMorning;
+    state.afternoonStart = previousAfternoon;
+    els.morningStartInput.value = previousMorning;
+    els.afternoonStartInput.value = previousAfternoon;
+    setStatus(`Could not update working periods: ${error.message}`, true);
+  }
+}
+
+els.morningStartInput.addEventListener('change', saveWorkingPeriods);
+els.afternoonStartInput.addEventListener('change', saveWorkingPeriods);
+
+async function saveHolidaySettings() {
+  const previousCountry = state.holidayCountry;
+  const previousMode = state.holidayMode;
+  state.holidayCountry = els.holidayCountryInput.value;
+  state.holidayMode = els.holidayModeInput.value;
+  els.holidayModeInput.disabled = !state.holidayCountry;
+  try {
+    await api('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ holidayCountry: state.holidayCountry, holidayMode: state.holidayMode }),
+    });
+    await refresh();
+  } catch (err) {
+    state.holidayCountry = previousCountry;
+    state.holidayMode = previousMode;
+    els.holidayCountryInput.value = previousCountry;
+    els.holidayModeInput.value = previousMode;
+    els.holidayModeInput.disabled = !previousCountry;
+    setStatus(`Could not update holiday settings: ${err.message}`, true);
+  }
+}
+
+els.holidayCountryInput.addEventListener('change', saveHolidaySettings);
+els.holidayModeInput.addEventListener('change', saveHolidaySettings);
 
 // The popup is shown on hover/focus via CSS (:hover, :focus-within), but a
 // click toggle is added too so it also works on touch devices where hover
@@ -1248,6 +1510,15 @@ async function loadSettings() {
       state.expectedHours = s.expectedHours;
       els.expectedHoursInput.value = s.expectedHours;
     }
+    state.morningStart = s.morningStart || '09:00';
+    state.afternoonStart = s.afternoonStart || '14:00';
+    els.morningStartInput.value = state.morningStart;
+    els.afternoonStartInput.value = state.afternoonStart;
+    state.holidayCountry = s.holidayCountry || '';
+    state.holidayMode = ['exclude', 'block'].includes(s.holidayMode) ? 'exclude' : 'mark';
+    els.holidayCountryInput.value = state.holidayCountry;
+    els.holidayModeInput.value = state.holidayMode;
+    els.holidayModeInput.disabled = !state.holidayCountry;
     // User switching remains disabled by default in this first extension build.
     els.userInput.disabled = !s.allowUserSwitch;
     els.userInput.title = s.allowUserSwitch
