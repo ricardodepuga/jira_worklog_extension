@@ -782,7 +782,13 @@ function wireEntryRows(dateStr) {
 }
 
 function extractTime(startedIso) {
-  // startedIso looks like 2026-09-01T09:00:00.000+0300
+  // Jira timestamps include an offset. Convert them to the same local browser
+  // time zone used when a worklog is created, rather than displaying the raw
+  // server-side offset.
+  const instant = new Date(startedIso || '');
+  if (!Number.isNaN(instant.getTime())) {
+    return `${String(instant.getHours()).padStart(2, '0')}:${String(instant.getMinutes()).padStart(2, '0')}`;
+  }
   const match = /T(\d{2}:\d{2})/.exec(startedIso || '');
   return match ? match[1] : '09:00';
 }
