@@ -8,7 +8,7 @@ async function api(path, options = {}) {
   if (!response?.ok) throw new Error(response?.error || 'Extension service unavailable.');
   return response.data;
 }
-$('calendar').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('calendar.html') });
+$('calendar').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('src/frontend/calendar/calendar.html') });
 
 function formatTimeLabel(time) { return time.replace(/^0/, ''); }
 function applyWorkingPeriods(settings) {
