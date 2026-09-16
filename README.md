@@ -47,4 +47,28 @@ Use **Jira connection** in the settings panel to replace or remove saved credent
 3. Choose **Load unpacked** and select this folder.
 4. Reload the extension after code changes.
 
+## Project structure
+
+```
+assets/icons/             Chrome extension icons
+src/backend/              Manifest V3 service worker and Jira-facing API logic
+src/frontend/calendar/    Calendar UI, styles and interaction controller
+src/frontend/popup/       Toolbar quick-entry UI
+src/shared/               Dependency-free logic shared with tests
+tests/                    Node unit tests
+manifest.json             Chrome extension manifest
+```
+
+The extension intentionally uses a lightweight MVC-style separation rather than a framework: the service worker is the backend/service layer, the popup and calendar are UI controllers/views, and pure domain logic is in `src/shared`. A frontend MVC framework is not justified here because the extension has two small, independent pages and no client-side routing or server-rendered application.
+
+## Tests
+
+The project uses Node's built-in test runner and has no test dependencies to install.
+
+```sh
+npm test
+```
+
+Tests cover time-zone conversion, daylight-saving offsets and auto-worklog planning rules.
+
 JiraLogWork is an independent utility and is not affiliated with Atlassian.
