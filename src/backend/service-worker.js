@@ -228,6 +228,9 @@ async function getWorklogs(accountId, start, end) {
       });
     }
   }
+  for (const entries of Object.values(byDate)) {
+    entries.sort((a, b) => new Date(a.started).getTime() - new Date(b.started).getTime());
+  }
   return { accountId, start, end, byDate };
 }
 
@@ -263,7 +266,8 @@ async function buildStarted(date, time) {
 }
 
 async function createWorklog(issueKey, date, time, seconds, comment) {
-  return jiraFetch(`/issue/${encodeURIComponent(issueKey)}/worklog`, {
+  // Do not let Jira's default worklog behavior alter the issue estimate.
+  return jiraFetch(`/issue/${encodeURIComponent(issueKey)}/worklog?adjustEstimate=leave`, {
     method: 'POST',
     body: JSON.stringify({ started: await buildStarted(date, time), timeSpentSeconds: Math.round(seconds), ...(comment ? { comment: toAdfComment(comment) } : {}) }),
   });
@@ -443,13 +447,13 @@ async function handleApi(path, options = {}) {
     await ownAccount(body.accountId);
     const [, issueKey, worklogId] = worklogMatch;
     await assertWorklogOwned(issueKey, worklogId);
-    await jiraFetch(`/issue/${encodeURIComponent(issueKey)}/worklog/${encodeURIComponent(worklogId)}`, { method: 'PUT', body: JSON.stringify({ timeSpentSeconds: Math.round(body.seconds), ...(body.comment !== undefined ? { comment: toAdfComment(body.comment) || { type: 'doc', version: 1, content: [] } } : {}), ...(body.date && body.time ? { started: await buildStarted(body.date, body.time) } : {}) }) });
+    await jiraFetch(`/issue/${encodeURIComponent(issueKey)}/worklog/${encodeURIComponent(worklogId)}?adjustEstimate=leave`, { method: 'PUT', body: JSON.stringify({ timeSpentSeconds: Math.round(body.seconds), ...(body.comment !== undefined ? { comment: toAdfComment(body.comment) || { type: 'doc', version: 1, content: [] } } : {}), ...(body.date && body.time ? { started: await buildStarted(body.date, body.time) } : {}) }) });
     return { ok: true };
   }
   if (worklogMatch && options.method === 'DELETE') {
     await ownAccount(url.searchParams.get('accountId'));
     await assertWorklogOwned(worklogMatch[1], worklogMatch[2]);
-    await jiraFetch(`/issue/${encodeURIComponent(worklogMatch[1])}/worklog/${encodeURIComponent(worklogMatch[2])}`, { method: 'DELETE' });
+    await jiraFetch(`/issue/${encodeURIComponent(worklogMatch[1])}/worklog/${encodeURIComponent(worklogMatch[2])}?adjustEstimate=leave`, { method: 'DELETE' });
     return { ok: true };
   }
   if (url.pathname === '/api/issues/open') {

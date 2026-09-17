@@ -3,7 +3,7 @@ const state = {
   user: null, // currently viewed user: { accountId, displayName, email }
   view: 'month', // 'month' | 'week'
   anchor: new Date(),
-  showWeekends: false, // only affects month view
+  showWeekends: false,
   expectedHours: 7,
   morningStart: '09:00',
   afternoonStart: '14:00',
@@ -127,8 +127,19 @@ function quickTimeButtonsHtml() {
   const label = (time) => time.replace(/^0/, '');
   return `<div class="time-quick-picks"><button type="button" class="time-quick-btn" data-time="${state.morningStart}">${label(state.morningStart)}</button><button type="button" class="time-quick-btn" data-time="${state.afternoonStart}">${label(state.afternoonStart)}</button></div>`;
 }
+function startTimeFieldHtml(inputHtml) {
+  // Do not nest the quick-pick buttons inside a <label>. A click on the
+  // label's empty area can otherwise activate a control unexpectedly.
+  return `<div class="time-field"><span class="time-field-label">Start time</span>${quickTimeButtonsHtml()}${inputHtml}</div>`;
+}
 function holidayForDate(dateStr) { return state.publicHolidays.get(dateStr) || null; }
 function isExcludedHoliday(dateStr) { return ['exclude', 'block'].includes(state.holidayMode) && Boolean(holidayForDate(dateStr)); }
+function entriesInChronologicalOrder(entries) {
+  return entries.slice().sort((a, b) => {
+    const byStart = new Date(a.started || 0).getTime() - new Date(b.started || 0).getTime();
+    return byStart || String(a.worklogId || '').localeCompare(String(b.worklogId || ''));
+  });
+}
 function mondayIndex(d) { return (d.getDay() + 6) % 7; }
 
 function startOfWeek(d) {
@@ -323,15 +334,10 @@ document.addEventListener('click', (e) => {
   const suggestionsEl = document.getElementById('issueSuggestions');
   const issueInput = document.getElementById('issuePickerInput');
   if (!suggestionsEl || !issueInput) return;
-  // Keep the dropdown open as long as the search field still has focus,
-  // rather than only comparing against e.target: a click that focuses the
-  // field can, in some input pipelines, dispatch a second click event whose
-  // target is an unrelated ancestor, which momentarily made this listener
-  // close the dropdown it had just opened. Focus state is the more stable
-  // signal here — it only actually changes when the user really does click
-  // (or tab) away.
-  if (document.activeElement === issueInput) return;
-  if (!suggestionsEl.contains(e.target)) {
+  const picker = issueInput.closest('.issue-picker');
+  // The input can retain focus after a click alongside it. Use the picker
+  // boundaries rather than focus state so that click also closes suggestions.
+  if (!picker?.contains(e.target)) {
     suggestionsEl.classList.add('hidden');
   }
 });
@@ -375,9 +381,7 @@ function updatePeriodLabel() {
   }
 }
 
-function weekendsHiddenNow() {
-  return state.view === 'month' && !state.showWeekends;
-}
+function weekendsHiddenNow() { return !state.showWeekends; }
 
 function renderWeekdayHeader() {
   const labels = weekendsHiddenNow() ? WEEKDAY_LABELS.slice(0, 5) : WEEKDAY_LABELS;
@@ -402,7 +406,7 @@ function renderGrid() {
     const dateStr = fmtDate(cursor);
     const inRange = cursor >= dataStart && cursor <= dataEnd;
     const isFuture = dateStr > today;
-    const entries = state.byDate[dateStr] || [];
+    const entries = entriesInChronologicalOrder(state.byDate[dateStr] || []);
     const totalSeconds = entries.reduce((sum, e) => sum + e.seconds, 0);
     const hours = secondsToHours(totalSeconds);
 
@@ -435,7 +439,9 @@ function renderGrid() {
       const visibleEntries = entries.slice(0, maxChips);
       const hiddenCount = entries.length - visibleEntries.length;
       const chipHtml = visibleEntries
-        .map((e) => `<span class="chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}">${escapeHtml(e.issueKey)} · ${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' 🤖' : ''}</span>`)
+        .map((e) => state.view === 'week'
+          ? `<span class="chip week-chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}"><span class="chip-time">${extractTime(e.started)}</span><span class="chip-key">${escapeHtml(e.issueKey)}</span><span class="chip-summary">${escapeHtml(e.issueSummary)}</span><span class="chip-hours">${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' 🤖' : ''}</span></span>`
+          : `<span class="chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}">${escapeHtml(e.issueKey)} · ${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' 🤖' : ''}</span>`)
         .join('');
       const moreChip = hiddenCount > 0 ? `<span class="chip chip-more">+${hiddenCount} more</span>` : '';
       const extra = `<div class="issue-list">${chipHtml || moreChip ? chipHtml + moreChip : (state.view === 'week' ? '<span class="chip" style="opacity:.5">No entries</span>' : '')}</div>`;
@@ -511,7 +517,10 @@ function forEachDateMap(fn) {
   new Set([state.byDate, state.monthByDate, state.selectedWeekByDate]).forEach(fn);
 }
 
+const pendingOptimisticEntries = new Map();
+
 function injectOptimisticEntry(dateStr, entry) {
+  pendingOptimisticEntries.set(String(entry.worklogId), { dateStr, entry });
   forEachDateMap((map) => {
     map[dateStr] = [...(map[dateStr] || []), entry];
   });
@@ -525,10 +534,33 @@ function patchOptimisticEntry(dateStr, worklogId, patch) {
 }
 
 function removeOptimisticEntry(dateStr, worklogId) {
+  pendingOptimisticEntries.delete(String(worklogId));
   forEachDateMap((map) => {
     if (!map[dateStr]) return;
     map[dateStr] = map[dateStr].filter((e) => e.worklogId !== worklogId);
   });
+}
+
+function mergePendingOptimisticEntries(byDate, rangeStart, rangeEnd) {
+  for (const [worklogId, pending] of pendingOptimisticEntries) {
+    if (pending.dateStr < rangeStart || pending.dateStr > rangeEnd) continue;
+    const entries = byDate[pending.dateStr] || [];
+    if (entries.some((entry) => String(entry.worklogId) === worklogId)) {
+      pendingOptimisticEntries.delete(worklogId);
+    } else {
+      byDate[pending.dateStr] = [...entries, pending.entry];
+    }
+  }
+  return byDate;
+}
+
+let reconcileTimer;
+function reconcileWithJiraAfterWrite() {
+  // Jira's worklog search index is eventually consistent. Keeping the
+  // optimistic entry visible until a delayed refresh prevents a just-saved
+  // worklog from disappearing from the calendar.
+  clearTimeout(reconcileTimer);
+  reconcileTimer = setTimeout(() => refresh(), 3000);
 }
 
 async function openDayDialog(dateStr) {
@@ -555,6 +587,7 @@ function renderBulkPanel() {
   els.bulkPanel.classList.toggle('hidden', !visible);
   if (!visible) return;
   els.bulkCount.textContent = `${dates.length} days selected · Ctrl/Cmd-click to change`;
+  els.bulkOofBtn.textContent = dates.some((dateStr) => state.oofDates.has(dateStr)) ? 'Clear OOF' : 'Mark OOF';
   els.bulkSummary.replaceChildren(...dates.map((dateStr) => {
     const entries = state.byDate[dateStr] || [];
     const hours = fmtHours(secondsToHours(entries.reduce((sum, entry) => sum + entry.seconds, 0)));
@@ -580,15 +613,16 @@ els.bulkCloseBtn.addEventListener('click', clearBulkSelection);
 
 els.bulkOofBtn.addEventListener('click', async () => {
   const dates = selectedDatesSorted();
+  const clearingOof = dates.some((dateStr) => state.oofDates.has(dateStr));
   const withWorklogs = dates.filter((dateStr) => (state.byDate[dateStr] || []).length > 0);
-  if (withWorklogs.length) {
+  if (!clearingOof && withWorklogs.length) {
     els.bulkError.textContent = `OOF cannot be applied because these days already have worklogs: ${withWorklogs.join(', ')}`;
     els.bulkError.classList.remove('hidden');
     return;
   }
   els.bulkOofBtn.disabled = true;
   try {
-    for (const dateStr of dates) await setOofDate(state.me.accountId, dateStr, true);
+    for (const dateStr of dates) await setOofDate(state.me.accountId, dateStr, !clearingOof);
     state.oofDates = await loadOofDates(state.me.accountId);
     renderGrid();
     renderSummary();
@@ -664,7 +698,7 @@ els.bulkSaveBtn.addEventListener('click', async () => {
 });
 
 function renderDayDialogBody(dateStr) {
-  const entries = state.byDate[dateStr] || [];
+  const entries = entriesInChronologicalOrder(state.byDate[dateStr] || []);
   const own = isOwnUser();
   const isOof = state.oofDates.has(dateStr);
   const holiday = holidayForDate(dateStr);
@@ -793,6 +827,30 @@ function extractTime(startedIso) {
   return match ? match[1] : '09:00';
 }
 
+function minutesToTime(minutes) {
+  const safe = Math.max(0, Math.min(1439, Math.round(minutes)));
+  return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+}
+
+function suggestedStartTime(dateStr) {
+  const latestEnd = (state.byDate[dateStr] || []).reduce((latest, entry) => {
+    const start = timeToMinutes(extractTime(entry.started));
+    const end = start + Math.round(Number(entry.seconds || 0) / 60);
+    return Math.max(latest, end);
+  }, timeToMinutes(state.morningStart));
+  return minutesToTime(latestEnd);
+}
+
+function suggestedHours(dateStr) {
+  const loggedHours = secondsToHours((state.byDate[dateStr] || []).reduce(
+    (sum, entry) => sum + Number(entry.seconds || 0),
+    0
+  ));
+  // This is only a convenient default: the user can still enter any valid
+  // duration when the remaining expected time has already been reached.
+  return Math.max(0.5, roundToHalfHour(state.expectedHours - loggedHours));
+}
+
 function addHoursToTime(hhmm, hours) {
   const [h, m] = hhmm.split(':').map(Number);
   const totalMin = h * 60 + m + Math.round(hours * 60);
@@ -814,6 +872,10 @@ function startEditEntry(row, dateStr) {
   const hours = roundToHalfHour(seconds / 3600);
   const time = extractTime(row.dataset.started);
   const comment = row.dataset.comment || '';
+  const otherDaySeconds = Math.max(0, (state.byDate[dateStr] || []).reduce(
+    (sum, entry) => sum + Number(entry.seconds || 0),
+    0
+  ) - seconds);
 
   // A plain <div>, not <form>: this row lives inside the day dialog's own
   // <form method="dialog">, and browsers silently drop any <form> nested
@@ -826,13 +888,13 @@ function startEditEntry(row, dateStr) {
   row.innerHTML = `
     <div class="edit-row-form add-entry-form">
       <div class="edit-row-issue">${escapeHtml(issueKey)}</div>
-      <label>Hours
-        <input type="number" min="0.5" step="0.5" value="${hours}" required />
-      </label>
-      <label>Start time
-        ${quickTimeButtonsHtml()}
-        <input type="time" value="${time}" required />
-      </label>
+      <div class="hours-with-total">
+        <label>Hours
+          <input type="number" min="0.5" step="0.5" value="${hours}" required />
+        </label>
+        <div class="day-total-preview" aria-live="polite"></div>
+      </div>
+      ${startTimeFieldHtml(`<input type="time" value="${time}" required />`)}
       <label>Comment (optional)
         <textarea placeholder="What did you work on...">${escapeHtml(comment)}</textarea>
       </label>
@@ -846,6 +908,15 @@ function startEditEntry(row, dateStr) {
   const form = row.querySelector('.edit-row-form');
   const errorEl = row.querySelector('.form-error');
   const timeInputEl = form.querySelector('input[type="time"]');
+  const hoursInputEl = form.querySelector('input[type="number"]');
+  const totalPreview = form.querySelector('.day-total-preview');
+  const updateDayTotalPreview = () => {
+    const proposedHours = roundToHalfHour(Number(hoursInputEl.value));
+    totalPreview.textContent = `Total: ${fmtHours(secondsToHours(otherDaySeconds) + (proposedHours > 0 ? proposedHours : 0))}`;
+  };
+  hoursInputEl.addEventListener('input', updateDayTotalPreview);
+  hoursInputEl.addEventListener('change', updateDayTotalPreview);
+  updateDayTotalPreview();
   form.querySelectorAll('.time-quick-btn').forEach((btn) => {
     btn.addEventListener('click', () => { timeInputEl.value = btn.dataset.time; });
   });
@@ -874,7 +945,7 @@ function startEditEntry(row, dateStr) {
       els.dayDialog.close();
       renderGrid();
       renderSummary();
-      refresh(); // background reconcile
+      reconcileWithJiraAfterWrite();
     } catch (err) {
       errorEl.textContent = err.message;
       errorEl.classList.remove('hidden');
@@ -894,7 +965,7 @@ async function deleteEntry(row, dateStr) {
     els.dayDialog.close();
     renderGrid();
     renderSummary();
-    refresh(); // background reconcile
+    reconcileWithJiraAfterWrite();
   } catch (err) {
     alert(`Could not delete: ${err.message}`);
   }
@@ -929,13 +1000,13 @@ function wireAddEntryForm(dateStr) {
       </label>
       <div id="selectedIssueLabel" style="font-size:12px;color:var(--muted);"></div>
       <div id="issueDetailInfo" class="issue-detail-info hidden"></div>
-      <label>Hours
-        <input type="number" id="addHoursInput" min="0.5" step="0.5" value="${state.expectedHours}" required />
-      </label>
-      <label>Start time
-        ${quickTimeButtonsHtml()}
-        <input type="time" id="addTimeInput" value="${state.morningStart}" required />
-      </label>
+      <div class="hours-with-total">
+        <label>Hours
+          <input type="number" id="addHoursInput" min="0.5" step="0.5" value="${suggestedHours(dateStr)}" required />
+        </label>
+        <div id="addDayTotal" class="day-total-preview" aria-live="polite"></div>
+      </div>
+      ${startTimeFieldHtml(`<input type="time" id="addTimeInput" value="${suggestedStartTime(dateStr)}" required />`)}
       <label>Comment (optional)
         <textarea id="addCommentInput" placeholder="What did you work on..."></textarea>
       </label>
@@ -951,6 +1022,21 @@ function wireAddEntryForm(dateStr) {
         document.getElementById('addTimeInput').value = btn.dataset.time;
       });
     });
+
+    const hoursInput = document.getElementById('addHoursInput');
+    const totalPreview = document.getElementById('addDayTotal');
+    const existingSeconds = (state.byDate[dateStr] || []).reduce((sum, entry) => sum + Number(entry.seconds || 0), 0);
+    const updateDayTotalPreview = () => {
+      const proposedHours = roundToHalfHour(Number(hoursInput.value));
+      if (!proposedHours || proposedHours < 0) {
+        totalPreview.textContent = `Total: ${fmtHours(secondsToHours(existingSeconds))}`;
+        return;
+      }
+      totalPreview.textContent = `Total: ${fmtHours(secondsToHours(existingSeconds) + proposedHours)}`;
+    };
+    hoursInput.addEventListener('input', updateDayTotalPreview);
+    hoursInput.addEventListener('change', updateDayTotalPreview);
+    updateDayTotalPreview();
 
     let selectedIssue = null;
     const issueInput = document.getElementById('issuePickerInput');
@@ -1096,10 +1182,12 @@ function wireAddEntryForm(dateStr) {
           originalEstimateSeconds: null,
           remainingEstimateSeconds: null,
         });
-        els.dayDialog.close();
         renderGrid();
         renderSummary();
-        refresh(); // background reconcile once Jira's search index catches up
+        // Return to the day's normal entry table, but keep the dialog open
+        // so the user can immediately inspect or add another worklog.
+        renderDayDialogBody(dateStr);
+        reconcileWithJiraAfterWrite();
       } catch (err) {
         errorEl.textContent = err.message;
         errorEl.classList.remove('hidden');
@@ -1227,7 +1315,7 @@ async function fetchWorklogRange(rangeStart, rangeEnd) {
     const data = await api(
       `/api/worklogs?accountId=${encodeURIComponent(state.user.accountId)}&start=${fmtDate(rangeStart)}&end=${fmtDate(rangeEnd)}`
     );
-    return data.byDate || {};
+    return mergePendingOptimisticEntries(data.byDate || {}, fmtDate(rangeStart), fmtDate(rangeEnd));
   } catch (err) {
     setStatus(`Error loading worklogs: ${err.message}`, true);
     return {};
@@ -1281,7 +1369,7 @@ async function refresh() {
 }
 
 function updateWeekendsToggleAvailability() {
-  els.showWeekendsInput.disabled = state.view !== 'month';
+  els.showWeekendsInput.disabled = false;
 }
 
 els.viewMonthBtn.addEventListener('click', () => {
@@ -1293,6 +1381,9 @@ els.viewMonthBtn.addEventListener('click', () => {
 });
 
 els.viewWeekBtn.addEventListener('click', () => {
+  // Week view follows the date the user was working with, rather than the
+  // first day of the currently displayed month.
+  state.anchor = new Date(`${state.selectedDate || todayStr()}T12:00:00`);
   state.view = 'week';
   els.viewWeekBtn.classList.add('active');
   els.viewMonthBtn.classList.remove('active');
@@ -1454,14 +1545,34 @@ els.dayDialog.addEventListener('click', (event) => {
   if (event.target === els.dayDialog) els.dayDialog.close();
 });
 
-// Export local OOF markings without exporting credentials or Jira data.
+document.getElementById('dayDialogCloseBtn').addEventListener('click', () => {
+  els.dayDialog.close();
+});
+
+// Enter in a time/number field must only commit that field value — never
+// submit and close the dialog.
+els.dayDialog.addEventListener('submit', (event) => event.preventDefault());
+
+// Export local OOF markings and non-sensitive preferences. Credentials,
+// account identity and automatic write settings are deliberately excluded.
 els.exportDataBtn.addEventListener('click', async () => {
-  const { oofByAccount: oof = {} } = await chrome.storage.local.get('oofByAccount');
+  const [{ oofByAccount: oof = {} }, settings] = await Promise.all([
+    chrome.storage.local.get('oofByAccount'),
+    api('/api/settings'),
+  ]);
   const payload = {
     format: 'jiralogwork-export',
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     oof,
+    preferences: {
+      expectedHours: settings.expectedHours,
+      morningStart: settings.morningStart,
+      afternoonStart: settings.afternoonStart,
+      holidayCountry: settings.holidayCountry,
+      holidayMode: settings.holidayMode,
+      showWeekends: state.showWeekends,
+    },
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -1481,13 +1592,14 @@ els.importDataBtn.addEventListener('click', () => {
 
 // Merges (never overwrites/discards) imported OOF dates into the local
 // store, per account — accepts both the wrapped export format above and a
-// bare { accountId: [dates] } map for backward compatibility.
+// bare { accountId: [dates] } map for backward compatibility. Preferences
+// are restored only from the explicit safe allow-list below.
 els.importDataInput.addEventListener('change', async () => {
   const file = els.importDataInput.files[0];
   if (!file) return;
   try {
     const parsed = JSON.parse(await file.text());
-    const oofData = parsed && parsed.oof ? parsed.oof : parsed;
+    const oofData = parsed?.oof || (parsed?.format === 'jiralogwork-export' ? {} : parsed);
     if (!oofData || typeof oofData !== 'object') throw new Error('Unrecognized file format.');
 
     const { oofByAccount: current = {} } = await chrome.storage.local.get('oofByAccount');
@@ -1496,6 +1608,26 @@ els.importDataInput.addEventListener('change', async () => {
       current[accountId] = Array.from(merged);
     }
     await chrome.storage.local.set({ oofByAccount: current });
+
+    const preferences = parsed?.preferences;
+    if (preferences && typeof preferences === 'object') {
+      const safeSettings = {};
+      for (const key of ['expectedHours', 'morningStart', 'afternoonStart', 'holidayCountry', 'holidayMode']) {
+        if (preferences[key] !== undefined) safeSettings[key] = preferences[key];
+      }
+      if (Object.keys(safeSettings).length) await api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(safeSettings),
+      });
+      if (typeof preferences.showWeekends === 'boolean') {
+        state.showWeekends = preferences.showWeekends;
+        els.showWeekendsInput.checked = state.showWeekends;
+      }
+      await loadSettings();
+      updateWeekendsToggleAvailability();
+      renderWeekdayHeader();
+    }
 
     state.oofDates = await loadOofDates(state.user.accountId);
     renderGrid();

@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+let expectedHoursPerDay = 7;
 const today = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -35,7 +36,7 @@ function updateSuggestedHours() {
   const now = new Date();
   const elapsedMinutes = now.getHours() * 60 + now.getMinutes() - (startHour * 60 + startMinute);
   const halfHourUnits = Math.max(1, Math.round(elapsedMinutes / 30));
-  $('hours').value = Math.min(24, halfHourUnits / 2);
+  $('hours').value = Math.min(expectedHoursPerDay, halfHourUnits / 2);
   document.querySelectorAll('.time-quick-btn').forEach((button) => {
     button.classList.toggle('active', button.dataset.time === $('time').value);
   });
@@ -51,6 +52,11 @@ $('time').addEventListener('change', updateSuggestedHours);
 
 async function loadWorklogForm() {
   const [me, settings] = await Promise.all([api('/api/me'), api('/api/settings')]);
+  const configuredExpectedHours = Number(settings.expectedHours);
+  expectedHoursPerDay = Number.isFinite(configuredExpectedHours) && configuredExpectedHours > 0
+    ? configuredExpectedHours
+    : 7;
+  $('hours').max = String(expectedHoursPerDay);
   applyWorkingPeriods(settings);
   const issues = await api(`/api/issues/open?accountId=${encodeURIComponent(me.accountId)}&date=${today()}`);
   $('setupForm').hidden = true;

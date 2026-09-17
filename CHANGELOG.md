@@ -6,6 +6,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-09-17
+
+### Added
+
+- Chronological worklog ordering in the calendar and daily-detail view.
+- Weekly view task details: start time, task key, summary and logged duration.
+- Bulk OOF action that adds or clears OOF across the selected days.
+
+### Changed
+
+- Week view opens on the currently selected day and can hide weekends.
+- Worklog creation, edits and removals preserve Jira remaining estimates.
+
+### Fixed
+
+- Suggested hours respect the configured expected hours per day.
+
+## [1.5.2] - 2026-09-17
+
+### Added
+
+- Export and import of non-sensitive preferences alongside OOF dates.
+
+### Fixed
+
+- Keep the day dialog open and return to its worklog list after adding an entry.
+- Keep optimistic worklogs visible while Jira indexes newly created entries.
+- Improve manual start-time selection and proposed daily totals.
+
 ## [1.5.0] - 2026-09-16
 
 ### Changed

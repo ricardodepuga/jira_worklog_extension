@@ -460,6 +460,18 @@ main {
 }
 
 .week-view .day-cell { min-height: 220px; }
+.week-view .day-cell .issue-list .week-chip {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 5px;
+  white-space: normal;
+  padding: 5px 6px;
+}
+.week-chip .chip-time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.week-chip .chip-key { color: var(--accent); font-weight: 600; }
+.week-chip .chip-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.week-chip .chip-hours { color: var(--text); font-variant-numeric: tabular-nums; }
 
 .summary-panel {
   margin-top: 14px;
@@ -778,6 +790,29 @@ main {
   border-color: var(--accent);
   color: #05101f;
   font-weight: 600;
+}
+.add-entry-form .time-field, .edit-row-form .time-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.time-field-label { color: var(--muted); }
+.hours-with-total {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.hours-with-total > label { flex: 0 0 auto; }
+.hours-with-total .day-total-preview { white-space: nowrap; }
+.day-total-preview {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(76,154,255,0.10);
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 .form-error { color: var(--bad); font-size: 12px; }
 

@@ -12,7 +12,7 @@ JiraLogWork is a Chrome extension for registering Jira worklogs quickly and revi
 - Optional automatic worklog creation at 18:00 on eligible working days.
 - Public-holiday display by country, with an optional exclusion from auto-worklog and summary calculations.
 - Configurable expected daily hours and morning/afternoon start times.
-- Local import and export of OOF data.
+- Local import and export of OOF data and non-sensitive preferences.
 
 ## Privacy and data handling
 
@@ -22,7 +22,7 @@ The extension communicates directly with the Jira Cloud site configured by the u
 
 When a public-holiday country is selected, the extension requests only that country's holiday calendar from `date.nager.at`. It does not send Jira credentials, issue information, worklogs or personal data to that service.
 
-Exported data contains OOF dates only. It never includes Jira API tokens, issues or worklogs.
+Exported data contains OOF dates and non-sensitive preferences (expected hours, work-period start times, holiday settings and weekend visibility). It never includes Jira API tokens, site/email credentials, account identity, issues, worklogs or the auto-worklog enabled state.
 
 ## Required permissions
 
