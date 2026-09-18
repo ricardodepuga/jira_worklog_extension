@@ -1,10 +1,12 @@
 const state = {
   me: null, // token owner: { accountId, displayName, email }
   user: null, // currently viewed user: { accountId, displayName, email }
-  view: 'month', // 'month' | 'week'
+  view: 'month', // 'month' | 'week' | 'year'
   anchor: new Date(),
   showWeekends: false,
   expectedHours: 7,
+  annualVacationDaysByYear: {},
+  showVacationSummary: false,
   morningStart: '09:00',
   afternoonStart: '14:00',
   jiraSite: null,
@@ -16,7 +18,9 @@ const state = {
   refreshToken: 0, // prevents slower, older Jira responses replacing the latest view
   openIssuesCache: new Map(), // per-date cached suggestions, keyed by dateStr
   oofDates: new Set(), // dates marked as out-of-office for state.user
+  vacationDates: new Set(), // dates marked as vacation for state.user
   publicHolidays: new Map(), // YYYY-MM-DD -> { name, localName }
+  manualHolidays: new Map(), // locally configured YYYY-MM-DD holidays
   holidayCountry: '',
   holidayMode: 'mark',
 };
@@ -29,13 +33,83 @@ async function loadOofDates(accountId) {
 }
 
 async function setOofDate(accountId, dateStr, isOof) {
-  const { oofByAccount = {} } = await chrome.storage.local.get('oofByAccount');
+  const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
   const set = new Set(oofByAccount[accountId] || []);
   if (isOof) set.add(dateStr);
   else set.delete(dateStr);
   oofByAccount[accountId] = Array.from(set);
-  await chrome.storage.local.set({ oofByAccount });
+  if (isOof) {
+    const vacations = new Set(vacationByAccount[accountId] || []);
+    vacations.delete(dateStr);
+    vacationByAccount[accountId] = Array.from(vacations);
+  }
+  await chrome.storage.local.set({ oofByAccount, vacationByAccount });
   return set;
+}
+
+async function loadVacationDates(accountId) {
+  const { vacationByAccount = {} } = await chrome.storage.local.get('vacationByAccount');
+  return new Set(vacationByAccount[accountId] || []);
+}
+
+async function setVacationDate(accountId, dateStr, isVacation) {
+  const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
+  const set = new Set(vacationByAccount[accountId] || []);
+  if (isVacation) set.add(dateStr);
+  else set.delete(dateStr);
+  vacationByAccount[accountId] = Array.from(set);
+  if (isVacation) {
+    const oof = new Set(oofByAccount[accountId] || []);
+    oof.delete(dateStr);
+    oofByAccount[accountId] = Array.from(oof);
+  }
+  await chrome.storage.local.set({ oofByAccount, vacationByAccount });
+  return set;
+}
+
+async function loadManualHolidays() {
+  const { manualHolidays = {} } = await chrome.storage.local.get('manualHolidays');
+  state.manualHolidays = new Map(Object.entries(manualHolidays));
+  return state.manualHolidays;
+}
+
+async function saveManualHolidays() {
+  await chrome.storage.local.set({ manualHolidays: Object.fromEntries(state.manualHolidays) });
+}
+
+function renderManualHolidayList() {
+  const entries = [...state.manualHolidays.entries()].sort(([a], [b]) => a.localeCompare(b));
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'manual-holiday-empty';
+    empty.textContent = 'No manual holidays configured.';
+    els.manualHolidayList.replaceChildren(empty);
+    return;
+  }
+  els.manualHolidayList.replaceChildren(...entries.map(([dateStr, holiday]) => {
+    const row = document.createElement('div');
+    row.className = 'manual-holiday-row';
+    const info = document.createElement('span');
+    info.textContent = `${dateStr} · ${holiday.localName || holiday.name}`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'manual-holiday-remove';
+    remove.setAttribute('aria-label', `Remove ${holiday.localName || holiday.name}`);
+    remove.textContent = '✕';
+    remove.addEventListener('click', async () => {
+      state.manualHolidays.delete(dateStr);
+      await saveManualHolidays();
+      renderManualHolidayList();
+      updateHolidayModeAvailability();
+      await refresh();
+    });
+    row.append(info, remove);
+    return row;
+  }));
+}
+
+function updateHolidayModeAvailability() {
+  els.holidayModeInput.disabled = !state.holidayCountry && state.manualHolidays.size === 0;
 }
 
 async function migrateLegacyOofData() {
@@ -58,12 +132,16 @@ const els = {
   userSuggestions: document.getElementById('userSuggestions'),
   viewMonthBtn: document.getElementById('viewMonthBtn'),
   viewWeekBtn: document.getElementById('viewWeekBtn'),
+  viewYearBtn: document.getElementById('viewYearBtn'),
   prevBtn: document.getElementById('prevBtn'),
   nextBtn: document.getElementById('nextBtn'),
   todayBtn: document.getElementById('todayBtn'),
   periodLabel: document.getElementById('periodLabel'),
   showWeekendsInput: document.getElementById('showWeekendsInput'),
   expectedHoursInput: document.getElementById('expectedHoursInput'),
+  annualVacationDaysInput: document.getElementById('annualVacationDaysInput'),
+  annualVacationYearLabel: document.getElementById('annualVacationYearLabel'),
+  vacationSummaryToggle: document.getElementById('vacationSummaryToggle'),
   morningStartInput: document.getElementById('morningStartInput'),
   afternoonStartInput: document.getElementById('afternoonStartInput'),
   settingsBtn: document.getElementById('settingsBtn'),
@@ -72,6 +150,11 @@ const els = {
   settingsBackdrop: document.getElementById('settingsBackdrop'),
   holidayCountryInput: document.getElementById('holidayCountryInput'),
   holidayModeInput: document.getElementById('holidayModeInput'),
+  manualHolidayDateInput: document.getElementById('manualHolidayDateInput'),
+  manualHolidayNameInput: document.getElementById('manualHolidayNameInput'),
+  addManualHolidayBtn: document.getElementById('addManualHolidayBtn'),
+  manualHolidayError: document.getElementById('manualHolidayError'),
+  manualHolidayList: document.getElementById('manualHolidayList'),
   autoLogInput: document.getElementById('autoLogInput'),
   autoLogInfoIcon: document.getElementById('autoLogInfoIcon'),
   manageCredentialsBtn: document.getElementById('manageCredentialsBtn'),
@@ -92,6 +175,7 @@ const els = {
   bulkActions: document.getElementById('bulkActions'),
   bulkCloseBtn: document.getElementById('bulkCloseBtn'),
   bulkOofBtn: document.getElementById('bulkOofBtn'),
+  bulkVacationBtn: document.getElementById('bulkVacationBtn'),
   bulkWorklogBtn: document.getElementById('bulkWorklogBtn'),
   bulkWorklogForm: document.getElementById('bulkWorklogForm'),
   bulkIssue: document.getElementById('bulkIssue'),
@@ -123,6 +207,14 @@ function pad(n) { return n.toString().padStart(2, '0'); }
 function fmtDate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 function todayStr() { return fmtDate(new Date()); }
 function isWeekend(d) { const wd = d.getDay(); return wd === 0 || wd === 6; }
+function vacationAllowanceForYear(year) {
+  const value = Number(state.annualVacationDaysByYear[String(year)]);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+function syncVacationEntitlementInputs(year = state.anchor.getFullYear()) {
+  els.annualVacationYearLabel.textContent = String(year);
+  els.annualVacationDaysInput.value = String(vacationAllowanceForYear(year));
+}
 function quickTimeButtonsHtml() {
   const label = (time) => time.replace(/^0/, '');
   return `<div class="time-quick-picks"><button type="button" class="time-quick-btn" data-time="${state.morningStart}">${label(state.morningStart)}</button><button type="button" class="time-quick-btn" data-time="${state.afternoonStart}">${label(state.afternoonStart)}</button></div>`;
@@ -133,6 +225,8 @@ function startTimeFieldHtml(inputHtml) {
   return `<div class="time-field"><span class="time-field-label">Start time</span>${quickTimeButtonsHtml()}${inputHtml}</div>`;
 }
 function holidayForDate(dateStr) { return state.publicHolidays.get(dateStr) || null; }
+function isVacation(dateStr) { return state.vacationDates.has(dateStr); }
+function isAbsence(dateStr) { return state.oofDates.has(dateStr) || isVacation(dateStr); }
 function isExcludedHoliday(dateStr) { return ['exclude', 'block'].includes(state.holidayMode) && Boolean(holidayForDate(dateStr)); }
 function entriesInChronologicalOrder(entries) {
   return entries.slice().sort((a, b) => {
@@ -154,6 +248,12 @@ function getRange() {
     const start = startOfWeek(state.anchor);
     const end = new Date(start);
     end.setDate(end.getDate() + 6);
+    return { gridStart: start, gridEnd: end, dataStart: start, dataEnd: end };
+  }
+  if (state.view === 'year') {
+    const year = state.anchor.getFullYear();
+    const start = new Date(year, 0, 1);
+    const end = new Date(year, 11, 31);
     return { gridStart: start, gridEnd: end, dataStart: start, dataEnd: end };
   }
   const year = state.anchor.getFullYear();
@@ -376,21 +476,95 @@ function updatePeriodLabel() {
   if (state.view === 'week') {
     const { dataStart, dataEnd } = getRange();
     els.periodLabel.textContent = `${dataStart.getDate()} ${MONTH_LABELS[dataStart.getMonth()].slice(0, 3)} – ${dataEnd.getDate()} ${MONTH_LABELS[dataEnd.getMonth()].slice(0, 3)} ${dataEnd.getFullYear()}`;
+  } else if (state.view === 'year') {
+    els.periodLabel.textContent = String(state.anchor.getFullYear());
   } else {
     els.periodLabel.textContent = `${MONTH_LABELS[state.anchor.getMonth()]} ${state.anchor.getFullYear()}`;
   }
+  syncVacationEntitlementInputs(state.anchor.getFullYear());
 }
 
 function weekendsHiddenNow() { return !state.showWeekends; }
 
 function renderWeekdayHeader() {
+  if (state.view === 'year') {
+    els.calendarWeekdays.classList.add('hidden');
+    return;
+  }
+  els.calendarWeekdays.classList.remove('hidden');
   const labels = weekendsHiddenNow() ? WEEKDAY_LABELS.slice(0, 5) : WEEKDAY_LABELS;
   els.calendarWeekdays.style.gridTemplateColumns = `repeat(${labels.length}, 1fr)`;
   els.calendarWeekdays.innerHTML = labels.map((d) => `<div>${d}</div>`).join('');
 }
 
+async function selectCalendarDay(dateStr, event) {
+  if (event.ctrlKey || event.metaKey) {
+    if (state.selectedDates.has(dateStr)) state.selectedDates.delete(dateStr);
+    else state.selectedDates.add(dateStr);
+    if (!state.selectedDates.size) state.selectedDates.add(dateStr);
+  } else {
+    state.selectedDates = new Set([dateStr]);
+  }
+  state.selectedDate = state.selectedDates.has(dateStr)
+    ? dateStr
+    : Array.from(state.selectedDates).sort().at(-1);
+  els.calendarGrid.querySelectorAll('[data-date]').forEach((dayCell) => {
+    dayCell.classList.toggle('selected', state.selectedDates.has(dayCell.dataset.date));
+  });
+  renderBulkPanel();
+  const selectedWeekByDate = await resolveSelectedWeekData();
+  if (state.selectedDate !== dateStr) return;
+  state.selectedWeekByDate = selectedWeekByDate;
+  renderSummary();
+}
+
+function wireCalendarDayInteractions(selector) {
+  els.calendarGrid.querySelectorAll(selector).forEach((cell) => {
+    cell.addEventListener('click', (event) => selectCalendarDay(cell.dataset.date, event));
+    cell.addEventListener('dblclick', () => openDayDialog(cell.dataset.date));
+  });
+}
+
+function renderYearGrid() {
+  const year = state.anchor.getFullYear();
+  const hideWeekends = weekendsHiddenNow();
+  const weekdayLabels = hideWeekends ? WEEKDAY_LABELS.slice(0, 5) : WEEKDAY_LABELS;
+  const months = MONTH_LABELS.map((label, month) => {
+    const first = new Date(year, month, 1);
+    const last = new Date(year, month + 1, 0);
+    const leading = hideWeekends ? Math.min(5, mondayIndex(first)) : mondayIndex(first);
+    const slots = [];
+    for (let i = 0; i < leading; i += 1) slots.push('<span class="year-day empty"></span>');
+    for (let day = 1; day <= last.getDate(); day += 1) {
+      const date = new Date(year, month, day);
+      if (hideWeekends && isWeekend(date)) continue;
+      const dateStr = fmtDate(date);
+      const entries = state.byDate[dateStr] || [];
+      const hours = secondsToHours(entries.reduce((sum, entry) => sum + Number(entry.seconds || 0), 0));
+      const isOof = state.oofDates.has(dateStr);
+      const vacation = isVacation(dateStr);
+      const holiday = holidayForDate(dateStr);
+      const holidayName = holiday?.localName || holiday?.name || '';
+      const classes = ['year-day', dateStr === todayStr() ? 'today' : '', state.selectedDates.has(dateStr) ? 'selected' : '', isOof ? 'oof' : '', vacation ? 'vacation' : '', holiday ? 'holiday' : '', entries.length ? badgeClass(hours, state.expectedHours, false) : 'none'].filter(Boolean).join(' ');
+      const detail = isOof ? 'OOF' : vacation ? 'VAC' : holidayName || (entries.length ? fmtHours(hours) : '');
+      slots.push(`<button type="button" class="${classes}" data-date="${dateStr}" title="${escapeHtml(holidayName || dateStr)}"><span>${day}</span><small>${escapeHtml(detail)}</small></button>`);
+    }
+    return `<section class="year-month"><h3>${label}</h3><div class="year-weekdays" style="grid-template-columns:repeat(${weekdayLabels.length},1fr)">${weekdayLabels.map((d) => `<span>${d.slice(0, 1)}</span>`).join('')}</div><div class="year-days" style="grid-template-columns:repeat(${weekdayLabels.length},1fr)">${slots.join('')}</div></section>`;
+  });
+  els.calendarGrid.classList.remove('week-view');
+  els.calendarGrid.classList.add('year-view');
+  els.calendarGrid.removeAttribute('style');
+  els.calendarGrid.innerHTML = months.join('');
+  wireCalendarDayInteractions('.year-day[data-date]');
+}
+
 function renderGrid() {
+  if (state.view === 'year') {
+    renderYearGrid();
+    return;
+  }
   const { gridStart, gridEnd, dataStart, dataEnd } = getRange();
+  els.calendarGrid.classList.remove('year-view');
   els.calendarGrid.classList.toggle('week-view', state.view === 'week');
   const hideWeekends = weekendsHiddenNow();
   els.calendarGrid.style.gridTemplateColumns = `repeat(${hideWeekends ? 5 : 7}, 1fr)`;
@@ -414,7 +588,9 @@ function renderGrid() {
       cells.push(`<div class="day-cell empty-slot"></div>`);
     } else {
       const isOof = state.oofDates.has(dateStr);
+      const vacation = isVacation(dateStr);
       const holiday = holidayForDate(dateStr);
+      const holidayName = holiday?.localName || holiday?.name || 'Holiday';
       const excludedHoliday = isExcludedHoliday(dateStr);
       const cls = [
         'day-cell',
@@ -423,14 +599,17 @@ function renderGrid() {
         dateStr === today ? 'today' : '',
         state.selectedDates.has(dateStr) ? 'selected' : '',
         isOof ? 'oof' : '',
+        vacation ? 'vacation' : '',
         holiday ? 'holiday' : '',
         excludedHoliday ? 'holiday-blocked' : '',
       ].filter(Boolean).join(' ');
 
       const badge = isOof
         ? `<span class="hours-badge oof-badge">OOF</span>`
+        : vacation
+          ? `<span class="hours-badge vacation-badge">Vacation</span>`
         : holiday
-          ? `<span class="hours-badge holiday-badge" title="${escapeHtml(holiday.localName || holiday.name)}">Holiday</span>`
+          ? `<span class="hours-badge holiday-badge" title="${escapeHtml(holidayName)}">${escapeHtml(holidayName)}</span>`
         : entries.length || !weekend
           ? `<span class="hours-badge ${badgeClass(hours, state.expectedHours, weekend)}">${fmtHours(hours)}</span>`
           : `<span class="hours-badge none">—</span>`;
@@ -455,35 +634,17 @@ function renderGrid() {
     cursor.setDate(cursor.getDate() + 1);
   }
   els.calendarGrid.innerHTML = cells.join('');
-  els.calendarGrid.querySelectorAll('.day-cell[data-date]').forEach((cell) => {
-    cell.addEventListener('click', async (event) => {
-      const dateStr = cell.dataset.date;
-      if (event.ctrlKey || event.metaKey) {
-        if (state.selectedDates.has(dateStr)) state.selectedDates.delete(dateStr);
-        else state.selectedDates.add(dateStr);
-        if (!state.selectedDates.size) state.selectedDates.add(dateStr);
-      } else {
-        state.selectedDates = new Set([dateStr]);
-      }
-      state.selectedDate = state.selectedDates.has(dateStr)
-        ? dateStr
-        : Array.from(state.selectedDates).sort().at(-1);
-      els.calendarGrid.querySelectorAll('.day-cell.selected').forEach((selected) => selected.classList.remove('selected'));
-      els.calendarGrid.querySelectorAll('.day-cell[data-date]').forEach((dayCell) => {
-        dayCell.classList.toggle('selected', state.selectedDates.has(dayCell.dataset.date));
-      });
-      renderBulkPanel();
-      const selectedWeekByDate = await resolveSelectedWeekData();
-      // Ignore a slower result if another day was selected meanwhile.
-      if (state.selectedDate !== dateStr) return;
-      state.selectedWeekByDate = selectedWeekByDate;
-      renderSummary();
-    });
-    cell.addEventListener('dblclick', () => openDayDialog(cell.dataset.date));
-  });
+  wireCalendarDayInteractions('.day-cell[data-date]');
 }
 
 function renderLoadingGrid() {
+  if (state.view === 'year') {
+    els.calendarGrid.classList.remove('week-view');
+    els.calendarGrid.classList.add('year-view', 'is-loading');
+    els.calendarGrid.removeAttribute('style');
+    els.calendarGrid.innerHTML = MONTH_LABELS.map((label) => `<section class="year-month loading-year-month"><h3>${label}</h3><div class="year-loading"></div></section>`).join('');
+    return;
+  }
   const columns = weekendsHiddenNow() ? 5 : 7;
   const cellCount = state.view === 'week' ? columns : columns * 5;
   els.calendarGrid.classList.toggle('week-view', state.view === 'week');
@@ -588,13 +749,14 @@ function renderBulkPanel() {
   if (!visible) return;
   els.bulkCount.textContent = `${dates.length} days selected · Ctrl/Cmd-click to change`;
   els.bulkOofBtn.textContent = dates.some((dateStr) => state.oofDates.has(dateStr)) ? 'Clear OOF' : 'Mark OOF';
+  els.bulkVacationBtn.textContent = dates.some((dateStr) => isVacation(dateStr)) ? 'Clear vacation' : 'Mark vacation';
   els.bulkSummary.replaceChildren(...dates.map((dateStr) => {
     const entries = state.byDate[dateStr] || [];
     const hours = fmtHours(secondsToHours(entries.reduce((sum, entry) => sum + entry.seconds, 0)));
     const tasks = [...new Set(entries.map((entry) => entry.issueKey))].join(', ') || 'No worklogs';
     const row = document.createElement('div');
     row.className = 'bulk-summary-row';
-    row.textContent = `${dateStr} · ${hours} · ${tasks}${state.oofDates.has(dateStr) ? ' · OOF' : ''}`;
+    row.textContent = `${dateStr} · ${hours} · ${tasks}${state.oofDates.has(dateStr) ? ' · OOF' : isVacation(dateStr) ? ' · Vacation' : ''}`;
     return row;
   }));
   els.bulkError.classList.add('hidden');
@@ -624,6 +786,7 @@ els.bulkOofBtn.addEventListener('click', async () => {
   try {
     for (const dateStr of dates) await setOofDate(state.me.accountId, dateStr, !clearingOof);
     state.oofDates = await loadOofDates(state.me.accountId);
+    state.vacationDates = await loadVacationDates(state.me.accountId);
     renderGrid();
     renderSummary();
     renderBulkPanel();
@@ -632,12 +795,34 @@ els.bulkOofBtn.addEventListener('click', async () => {
   }
 });
 
+els.bulkVacationBtn.addEventListener('click', async () => {
+  const dates = selectedDatesSorted();
+  const clearingVacation = dates.some((dateStr) => isVacation(dateStr));
+  const withWorklogs = dates.filter((dateStr) => (state.byDate[dateStr] || []).length > 0);
+  if (!clearingVacation && withWorklogs.length) {
+    els.bulkError.textContent = `Vacation cannot be applied because these days already have worklogs: ${withWorklogs.join(', ')}`;
+    els.bulkError.classList.remove('hidden');
+    return;
+  }
+  els.bulkVacationBtn.disabled = true;
+  try {
+    for (const dateStr of dates) await setVacationDate(state.me.accountId, dateStr, !clearingVacation);
+    state.vacationDates = await loadVacationDates(state.me.accountId);
+    state.oofDates = await loadOofDates(state.me.accountId);
+    renderGrid();
+    renderSummary();
+    renderBulkPanel();
+  } finally {
+    els.bulkVacationBtn.disabled = false;
+  }
+});
+
 els.bulkWorklogBtn.addEventListener('click', async () => {
   const dates = selectedDatesSorted();
   els.bulkError.classList.add('hidden');
   els.bulkWorklogBtn.disabled = true;
   try {
-    if (dates.some((dateStr) => state.oofDates.has(dateStr))) throw new Error('Remove OOF from the selected days before adding worklogs.');
+    if (dates.some((dateStr) => isAbsence(dateStr))) throw new Error('Remove OOF or Vacation from the selected days before adding worklogs.');
     const issueLists = await Promise.all(dates.map((dateStr) => api(`/api/issues/open?accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`)));
     const keySignatures = issueLists.map((issues) => issues.map((issue) => issue.key).sort().join('|'));
     if (!issueLists[0].length || !keySignatures.every((signature) => signature === keySignatures[0])) {
@@ -701,21 +886,25 @@ function renderDayDialogBody(dateStr) {
   const entries = entriesInChronologicalOrder(state.byDate[dateStr] || []);
   const own = isOwnUser();
   const isOof = state.oofDates.has(dateStr);
+  const vacation = isVacation(dateStr);
   const holiday = holidayForDate(dateStr);
   const excludedHoliday = isExcludedHoliday(dateStr);
 
   let html = '';
   // Never shown once the day has any logged task, or while the add-worklog
   // form is expanded (that form gets hidden again in wireAddEntryForm).
-  const canMarkOof = own && entries.length === 0;
+  const canManageAbsence = own && entries.length === 0;
 
-  if (canMarkOof) {
+  if (canManageAbsence) {
+    const selectedCategory = isOof ? 'oof' : vacation ? 'vacation' : 'none';
     html += `
       <div id="oofToggleWrapper">
-        <label class="oof-toggle">
-          <input type="checkbox" id="oofCheckbox" ${isOof ? 'checked' : ''} />
-          Mark as Out of Office
-        </label>
+        <div class="absence-label">Day category</div>
+        <div class="absence-selector" role="group" aria-label="Day category">
+          <button type="button" data-absence="none" class="${selectedCategory === 'none' ? 'active' : ''}"><span class="absence-dot none"></span>Working day</button>
+          <button type="button" data-absence="oof" class="${selectedCategory === 'oof' ? 'active' : ''}"><span class="absence-dot oof"></span>OOF</button>
+          <button type="button" data-absence="vacation" class="${selectedCategory === 'vacation' ? 'active' : ''}"><span class="absence-dot vacation"></span>Vacation</button>
+        </div>
       </div>`;
   }
 
@@ -731,8 +920,8 @@ function renderDayDialogBody(dateStr) {
     html += `<div id="entryList">${entries.map((e, i) => entryRowHtml(e, overlapFlags[i])).join('')}</div>`;
   }
 
-  if (own && isOof) {
-    html += `<div class="readonly-note">This day is marked as Out of Office — unmark it above to add a worklog.</div>`;
+  if (own && isAbsence(dateStr)) {
+    html += `<div class="readonly-note">This day is marked as ${isOof ? 'Out of Office' : 'Vacation'} — unmark it above to add a worklog.</div>`;
   } else if (own) {
     html += `
       <div class="add-entry-section">
@@ -746,16 +935,17 @@ function renderDayDialogBody(dateStr) {
   els.dayDialogBody.innerHTML = html;
 
   if (entries.length) wireEntryRows(dateStr);
-  if (own && !isOof) wireAddEntryForm(dateStr);
-  if (canMarkOof) {
-    document.getElementById('oofCheckbox').addEventListener('change', async (e) => {
-      state.oofDates = await setOofDate(state.user.accountId, dateStr, e.target.checked);
+  if (own && !isAbsence(dateStr)) wireAddEntryForm(dateStr);
+  if (canManageAbsence) {
+    document.querySelectorAll('#oofToggleWrapper [data-absence]').forEach((button) => button.addEventListener('click', async () => {
+      const category = button.dataset.absence;
+      state.oofDates = await setOofDate(state.user.accountId, dateStr, category === 'oof');
+      state.vacationDates = await setVacationDate(state.user.accountId, dateStr, category === 'vacation');
+      state.oofDates = await loadOofDates(state.user.accountId);
       renderGrid();
       renderSummary();
-      // Toggling OOF flips whether adding a worklog is allowed on this day,
-      // so the dialog body needs a full re-render, not just the checkbox.
       renderDayDialogBody(dateStr);
-    });
+    }));
   }
 }
 
@@ -1216,7 +1406,7 @@ function computeStats(dataMap, rangeStart, rangeEnd) {
       const seconds = entries.reduce((s, e) => s + e.seconds, 0);
       totalSeconds += seconds;
       if (!isWeekend(cursor)) {
-        if (state.oofDates.has(dateStr)) {
+        if (isAbsence(dateStr)) {
           oofCount += 1;
         } else if (isExcludedHoliday(dateStr)) {
           oofCount += 1;
@@ -1257,7 +1447,7 @@ function statsBlockHtml(title, stats) {
           </div>
           ${stats.oofCount > 0 ? `<div class="stat">
             <span class="value">${stats.oofCount}</span>
-            <span class="label">OOF / blocked holidays</span>
+            <span class="label">OOF / vacation / holidays</span>
           </div>` : ''}
         </div>
       </div>
@@ -1269,7 +1459,48 @@ function statsBlockHtml(title, stats) {
     </div>`;
 }
 
+function vacationSummaryHtml(year) {
+  const today = todayStr();
+  const vacationDates = [...state.vacationDates]
+    .filter((dateStr) => dateStr.startsWith(`${year}-`))
+    .filter((dateStr) => !isWeekend(new Date(`${dateStr}T12:00:00`)))
+    .sort();
+  const taken = vacationDates.filter((dateStr) => dateStr <= today);
+  const planned = vacationDates.filter((dateStr) => dateStr > today);
+  const committed = taken.length + planned.length;
+  const allowance = vacationAllowanceForYear(year);
+  const remaining = Math.max(0, allowance - committed);
+  const overbooked = Math.max(0, committed - allowance);
+  const nextDates = planned.slice(0, 5).map((dateStr) => {
+    const date = new Date(`${dateStr}T12:00:00`);
+    return `${date.getDate()} ${MONTH_LABELS[date.getMonth()].slice(0, 3)}`;
+  });
+  return `<div class="summary-block vacation-summary">
+    <div class="summary-block-main">
+      <div class="summary-block-title">Vacation allowance · ${year}</div>
+      <div class="summary-stats">
+        <div class="stat"><span class="value">${allowance}</span><span class="label">Total days</span></div>
+        <div class="stat"><span class="value">${taken.length}</span><span class="label">Days taken</span></div>
+        <div class="stat"><span class="value">${planned.length}</span><span class="label">Days planned</span></div>
+        <div class="stat ${overbooked ? 'bad' : 'good'}"><span class="value">${remaining}</span><span class="label">Days available</span></div>
+      </div>
+    </div>
+    <div class="missing-days">${overbooked ? `<span class="missing-label">Overbooked by ${overbooked} day${overbooked === 1 ? '' : 's'}.</span>` : nextDates.length ? `<span class="missing-label">Next planned:</span><div class="missing-days-chips">${nextDates.map((label) => `<span class="missing-day-chip">${label}</span>`).join('')}</div>` : '<span class="no-gaps">No future vacation days marked.</span>'}</div>
+  </div>`;
+}
+
 function renderSummary() {
+  const isYearView = state.view === 'year';
+  els.vacationSummaryToggle.classList.toggle('hidden', !isYearView);
+  if (isYearView) {
+    els.vacationSummaryToggle.textContent = state.showVacationSummary ? 'Worklog details' : 'Vacation details';
+    if (state.showVacationSummary) {
+      els.summaryContent.innerHTML = vacationSummaryHtml(state.anchor.getFullYear());
+      return;
+    }
+  } else {
+    state.showVacationSummary = false;
+  }
   const selectedWeekStart = startOfWeek(new Date(state.selectedDate + 'T00:00:00'));
   const selectedWeekEnd = new Date(selectedWeekStart);
   selectedWeekEnd.setDate(selectedWeekEnd.getDate() + 6);
@@ -1323,13 +1554,17 @@ async function fetchWorklogRange(rangeStart, rangeEnd) {
 }
 
 async function loadHolidaysForRange(rangeStart, rangeEnd) {
-  state.publicHolidays = new Map();
+  state.publicHolidays = new Map(
+    [...state.manualHolidays.entries()].filter(([dateStr]) => dateStr >= fmtDate(rangeStart) && dateStr <= fmtDate(rangeEnd))
+  );
   if (!state.holidayCountry) return;
   const years = new Set();
   for (let y = rangeStart.getFullYear(); y <= rangeEnd.getFullYear(); y += 1) years.add(y);
   try {
     const groups = await Promise.all([...years].map((year) => api(`/api/holidays?year=${year}`)));
-    for (const holiday of groups.flat()) state.publicHolidays.set(holiday.date, holiday);
+    for (const holiday of groups.flat()) {
+      if (!state.publicHolidays.has(holiday.date)) state.publicHolidays.set(holiday.date, holiday);
+    }
   } catch (error) {
     setStatus(`Could not load public holidays: ${error.message}`, true);
   }
@@ -1343,6 +1578,7 @@ async function refresh() {
   updatePeriodLabel();
   renderWeekdayHeader();
   state.oofDates = await loadOofDates(state.user.accountId);
+  state.vacationDates = await loadVacationDates(state.user.accountId);
   renderLoadingGrid();
 
   const { dataStart, dataEnd } = getRange();
@@ -1376,6 +1612,7 @@ els.viewMonthBtn.addEventListener('click', () => {
   state.view = 'month';
   els.viewMonthBtn.classList.add('active');
   els.viewWeekBtn.classList.remove('active');
+  els.viewYearBtn.classList.remove('active');
   updateWeekendsToggleAvailability();
   refresh();
 });
@@ -1387,6 +1624,17 @@ els.viewWeekBtn.addEventListener('click', () => {
   state.view = 'week';
   els.viewWeekBtn.classList.add('active');
   els.viewMonthBtn.classList.remove('active');
+  els.viewYearBtn.classList.remove('active');
+  updateWeekendsToggleAvailability();
+  refresh();
+});
+
+els.viewYearBtn.addEventListener('click', () => {
+  state.anchor = new Date(`${state.selectedDate || todayStr()}T12:00:00`);
+  state.view = 'year';
+  els.viewYearBtn.classList.add('active');
+  els.viewMonthBtn.classList.remove('active');
+  els.viewWeekBtn.classList.remove('active');
   updateWeekendsToggleAvailability();
   refresh();
 });
@@ -1399,6 +1647,11 @@ els.showWeekendsInput.addEventListener('change', () => {
 
 els.prevBtn.addEventListener('click', () => {
   if (state.view === 'week') state.anchor.setDate(state.anchor.getDate() - 7);
+  else if (state.view === 'year') {
+    state.anchor.setFullYear(state.anchor.getFullYear() - 1);
+    state.selectedDate = fmtDate(state.anchor);
+    state.selectedDates = new Set([state.selectedDate]);
+  }
   else {
     const selectedDay = state.selectedDate ? Number(state.selectedDate.slice(8, 10)) : state.anchor.getDate();
     const target = new Date(state.anchor.getFullYear(), state.anchor.getMonth() - 1, 1);
@@ -1414,6 +1667,11 @@ els.prevBtn.addEventListener('click', () => {
 
 els.nextBtn.addEventListener('click', () => {
   if (state.view === 'week') state.anchor.setDate(state.anchor.getDate() + 7);
+  else if (state.view === 'year') {
+    state.anchor.setFullYear(state.anchor.getFullYear() + 1);
+    state.selectedDate = fmtDate(state.anchor);
+    state.selectedDates = new Set([state.selectedDate]);
+  }
   else {
     const selectedDay = state.selectedDate ? Number(state.selectedDate.slice(8, 10)) : state.anchor.getDate();
     const target = new Date(state.anchor.getFullYear(), state.anchor.getMonth() + 1, 1);
@@ -1446,6 +1704,24 @@ els.expectedHoursInput.addEventListener('change', () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ expectedHours: state.expectedHours }),
   }).catch((err) => console.error(err));
+});
+
+els.annualVacationDaysInput.addEventListener('change', () => {
+  const year = String(state.anchor.getFullYear());
+  const value = Math.round(parseFloat(els.annualVacationDaysInput.value));
+  state.annualVacationDaysByYear[year] = isNaN(value) || value < 0 ? 0 : value;
+  els.annualVacationDaysInput.value = state.annualVacationDaysByYear[year];
+  renderSummary();
+  api('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ annualVacationDaysByYear: state.annualVacationDaysByYear }),
+  }).catch((err) => console.error(err));
+});
+
+els.vacationSummaryToggle.addEventListener('click', () => {
+  state.showVacationSummary = !state.showVacationSummary;
+  renderSummary();
 });
 
 els.autoLogInput.addEventListener('change', async () => {
@@ -1502,7 +1778,7 @@ async function saveHolidaySettings() {
   const previousMode = state.holidayMode;
   state.holidayCountry = els.holidayCountryInput.value;
   state.holidayMode = els.holidayModeInput.value;
-  els.holidayModeInput.disabled = !state.holidayCountry;
+  updateHolidayModeAvailability();
   try {
     await api('/api/settings', {
       method: 'POST',
@@ -1515,13 +1791,31 @@ async function saveHolidaySettings() {
     state.holidayMode = previousMode;
     els.holidayCountryInput.value = previousCountry;
     els.holidayModeInput.value = previousMode;
-    els.holidayModeInput.disabled = !previousCountry;
+    updateHolidayModeAvailability();
     setStatus(`Could not update holiday settings: ${err.message}`, true);
   }
 }
 
 els.holidayCountryInput.addEventListener('change', saveHolidaySettings);
 els.holidayModeInput.addEventListener('change', saveHolidaySettings);
+
+els.addManualHolidayBtn.addEventListener('click', async () => {
+  const dateStr = els.manualHolidayDateInput.value;
+  const name = els.manualHolidayNameInput.value.trim();
+  els.manualHolidayError.classList.add('hidden');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !name) {
+    els.manualHolidayError.textContent = 'Choose a date and enter a holiday name.';
+    els.manualHolidayError.classList.remove('hidden');
+    return;
+  }
+  state.manualHolidays.set(dateStr, { date: dateStr, name, localName: name, manual: true });
+  await saveManualHolidays();
+  els.manualHolidayDateInput.value = '';
+  els.manualHolidayNameInput.value = '';
+  renderManualHolidayList();
+  updateHolidayModeAvailability();
+  await refresh();
+});
 
 // The popup is shown on hover/focus via CSS (:hover, :focus-within), but a
 // click toggle is added too so it also works on touch devices where hover
@@ -1553,20 +1847,29 @@ document.getElementById('dayDialogCloseBtn').addEventListener('click', () => {
 // submit and close the dialog.
 els.dayDialog.addEventListener('submit', (event) => event.preventDefault());
 
-// Export local OOF markings and non-sensitive preferences. Credentials,
+// Export local absence markings and non-sensitive preferences. Credentials,
 // account identity and automatic write settings are deliberately excluded.
 els.exportDataBtn.addEventListener('click', async () => {
-  const [{ oofByAccount: oof = {} }, settings] = await Promise.all([
-    chrome.storage.local.get('oofByAccount'),
+  const [{ oofByAccount: oof = {}, vacationByAccount: vacations = {}, manualHolidays = {} }, settings] = await Promise.all([
+    chrome.storage.local.get(['oofByAccount', 'vacationByAccount', 'manualHolidays']),
     api('/api/settings'),
   ]);
+  const vacationsByYear = Object.fromEntries(Object.entries(vacations).map(([accountId, dates]) => {
+    const years = {};
+    for (const dateStr of Array.isArray(dates) ? dates : []) (years[dateStr.slice(0, 4)] ||= []).push(dateStr);
+    for (const values of Object.values(years)) values.sort();
+    return [accountId, years];
+  }));
   const payload = {
     format: 'jiralogwork-export',
-    version: 2,
+    version: 5,
     exportedAt: new Date().toISOString(),
     oof,
+    vacations: vacationsByYear,
+    manualHolidays,
     preferences: {
       expectedHours: settings.expectedHours,
+      annualVacationDaysByYear: settings.annualVacationDaysByYear || {},
       morningStart: settings.morningStart,
       afternoonStart: settings.afternoonStart,
       holidayCountry: settings.holidayCountry,
@@ -1590,7 +1893,7 @@ els.importDataBtn.addEventListener('click', () => {
   els.importDataInput.click();
 });
 
-// Merges (never overwrites/discards) imported OOF dates into the local
+// Merges (never overwrites/discards) imported absence dates into the local
 // store, per account — accepts both the wrapped export format above and a
 // bare { accountId: [dates] } map for backward compatibility. Preferences
 // are restored only from the explicit safe allow-list below.
@@ -1600,19 +1903,31 @@ els.importDataInput.addEventListener('change', async () => {
   try {
     const parsed = JSON.parse(await file.text());
     const oofData = parsed?.oof || (parsed?.format === 'jiralogwork-export' ? {} : parsed);
+    const vacationData = parsed?.vacations || {};
+    const manualHolidayData = parsed?.manualHolidays || {};
     if (!oofData || typeof oofData !== 'object') throw new Error('Unrecognized file format.');
 
-    const { oofByAccount: current = {} } = await chrome.storage.local.get('oofByAccount');
+    const { oofByAccount: current = {}, vacationByAccount: currentVacations = {}, manualHolidays: currentManualHolidays = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount', 'manualHolidays']);
     for (const [accountId, dates] of Object.entries(oofData)) {
       const merged = new Set([...(current[accountId] || []), ...(Array.isArray(dates) ? dates : [])]);
       current[accountId] = Array.from(merged);
     }
-    await chrome.storage.local.set({ oofByAccount: current });
+    for (const [accountId, datesOrYears] of Object.entries(vacationData)) {
+      const importedDates = Array.isArray(datesOrYears)
+        ? datesOrYears
+        : Object.values(datesOrYears || {}).flatMap((dates) => Array.isArray(dates) ? dates : []);
+      const merged = new Set([...(currentVacations[accountId] || []), ...importedDates]);
+      currentVacations[accountId] = Array.from(merged);
+    }
+    for (const [dateStr, holiday] of Object.entries(manualHolidayData)) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr) && holiday && typeof holiday === 'object') currentManualHolidays[dateStr] = holiday;
+    }
+    await chrome.storage.local.set({ oofByAccount: current, vacationByAccount: currentVacations, manualHolidays: currentManualHolidays });
 
     const preferences = parsed?.preferences;
     if (preferences && typeof preferences === 'object') {
       const safeSettings = {};
-      for (const key of ['expectedHours', 'morningStart', 'afternoonStart', 'holidayCountry', 'holidayMode']) {
+      for (const key of ['expectedHours', 'annualVacationDays', 'annualVacationDaysByYear', 'morningStart', 'afternoonStart', 'holidayCountry', 'holidayMode']) {
         if (preferences[key] !== undefined) safeSettings[key] = preferences[key];
       }
       if (Object.keys(safeSettings).length) await api('/api/settings', {
@@ -1630,6 +1945,10 @@ els.importDataInput.addEventListener('change', async () => {
     }
 
     state.oofDates = await loadOofDates(state.user.accountId);
+    state.vacationDates = await loadVacationDates(state.user.accountId);
+    await loadManualHolidays();
+    renderManualHolidayList();
+    updateHolidayModeAvailability();
     renderGrid();
     renderSummary();
     setStatus('Data imported successfully.');
@@ -1648,6 +1967,17 @@ async function loadSettings() {
       state.expectedHours = s.expectedHours;
       els.expectedHoursInput.value = s.expectedHours;
     }
+    state.annualVacationDaysByYear = { ...(s.annualVacationDaysByYear || {}) };
+    const currentYear = String(new Date().getFullYear());
+    if (!(currentYear in state.annualVacationDaysByYear) && Number.isFinite(Number(s.annualVacationDays)) && Number(s.annualVacationDays) >= 0) {
+      state.annualVacationDaysByYear[currentYear] = Number(s.annualVacationDays);
+      api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ annualVacationDaysByYear: state.annualVacationDaysByYear }),
+      }).catch((err) => console.error(err));
+    }
+    syncVacationEntitlementInputs(state.anchor.getFullYear());
     state.morningStart = s.morningStart || '09:00';
     state.afternoonStart = s.afternoonStart || '14:00';
     els.morningStartInput.value = state.morningStart;
@@ -1656,7 +1986,9 @@ async function loadSettings() {
     state.holidayMode = ['exclude', 'block'].includes(s.holidayMode) ? 'exclude' : 'mark';
     els.holidayCountryInput.value = state.holidayCountry;
     els.holidayModeInput.value = state.holidayMode;
-    els.holidayModeInput.disabled = !state.holidayCountry;
+    await loadManualHolidays();
+    renderManualHolidayList();
+    updateHolidayModeAvailability();
     // User switching remains disabled by default in this first extension build.
     els.userInput.disabled = !s.allowUserSwitch;
     els.userInput.title = s.allowUserSwitch

@@ -4,9 +4,11 @@ const { effectiveTimeZone, instantForZonedDateTime, offsetAtZonedDateTime, forma
 
 const DEFAULTS = {
   config: { site: '', email: '', apiToken: '' },
-  settings: { autoLogEnabled: false, expectedHours: 7, lastAutoLogDate: null, allowUserSwitch: false, holidayCountry: '', holidayMode: 'mark', morningStart: '09:00', afternoonStart: '14:00' },
+  settings: { autoLogEnabled: false, expectedHours: 7, annualVacationDays: 22, annualVacationDaysByYear: {}, lastAutoLogDate: null, allowUserSwitch: false, holidayCountry: '', holidayMode: 'mark', morningStart: '09:00', afternoonStart: '14:00' },
   me: null,
   oofByAccount: {},
+  vacationByAccount: {},
+  manualHolidays: {},
 };
 
 const AUTO_LOG_MARKER = '[auto]';
@@ -38,6 +40,8 @@ async function stored() {
     },
     me: value.me || null,
     oofByAccount: value.oofByAccount || {},
+    vacationByAccount: value.vacationByAccount || {},
+    manualHolidays: value.manualHolidays || {},
   };
 }
 
@@ -62,6 +66,27 @@ function updateSettings(patch) {
         throw new Error('Expected hours must be a multiple of 0.5.');
       }
       settings.expectedHours = n;
+    }
+    if (patch.annualVacationDays !== undefined) {
+      const n = Number(patch.annualVacationDays);
+      if (!Number.isInteger(n) || n < 0 || n > 366) {
+        throw new Error('Annual vacation entitlement must be a whole number of days.');
+      }
+      settings.annualVacationDays = n;
+    }
+    if (patch.annualVacationDaysByYear !== undefined) {
+      if (!patch.annualVacationDaysByYear || typeof patch.annualVacationDaysByYear !== 'object' || Array.isArray(patch.annualVacationDaysByYear)) {
+        throw new Error('Annual vacation entitlements must be organized by year.');
+      }
+      const normalized = {};
+      for (const [year, rawDays] of Object.entries(patch.annualVacationDaysByYear)) {
+        const days = Number(rawDays);
+        if (!/^\d{4}$/.test(year) || !Number.isInteger(days) || days < 0 || days > 366) {
+          throw new Error('Each annual vacation entitlement must use a valid year and a whole number of days.');
+        }
+        normalized[year] = days;
+      }
+      settings.annualVacationDaysByYear = normalized;
     }
     if (patch.holidayCountry !== undefined) {
       const country = String(patch.holidayCountry || '').trim().toUpperCase();
@@ -135,8 +160,10 @@ async function holidaysForYear(country, year) {
 }
 
 async function excludedHolidayForDate(date) {
-  const { settings } = await stored();
-  if (!['exclude', 'block'].includes(settings.holidayMode) || !settings.holidayCountry || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const { settings, manualHolidays } = await stored();
+  if (!['exclude', 'block'].includes(settings.holidayMode) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  if (manualHolidays[date]) return manualHolidays[date];
+  if (!settings.holidayCountry) return null;
   const holidays = await holidaysForYear(settings.holidayCountry, date.slice(0, 4));
   return holidays.find((holiday) => holiday.date === date) || null;
 }
@@ -506,7 +533,7 @@ async function runAutoLog() {
   const date = todayStr();
   const now = new Date();
   if (!state.settings.autoLogEnabled || !state.me || state.settings.lastAutoLogDate === date || now.getHours() < 18 || [0, 6].includes(now.getDay())) return;
-  if ((state.oofByAccount[state.me.accountId] || []).includes(date)) return;
+  if ((state.oofByAccount[state.me.accountId] || []).includes(date) || (state.vacationByAccount[state.me.accountId] || []).includes(date)) return;
   if (await excludedHolidayForDate(date)) return;
   const existing = await getWorklogs(state.me.accountId, date, date);
   if ((existing.byDate[date] || []).length) return;

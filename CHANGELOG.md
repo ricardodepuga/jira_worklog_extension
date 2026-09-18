@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-18
+
+### Added
+
+- Annual calendar view with compact month grids and daily worklog coverage.
+- Vacation day category with annual, per-year entitlement and vacation summary.
+- Manual holiday management for local or organization-specific holidays.
+- Vacation and manual-holiday data in export/import backups.
+
+### Changed
+
+- Calendar views adapt to the available page height without page-level scrolling.
+- OOF and Vacation use a compact day-category selector.
+- Holiday names returned by the provider are shown directly in the calendar.
+- Exported Vacation dates are grouped by account and year.
+
 ## [1.5.3] - 2026-09-17
 
 ### Added

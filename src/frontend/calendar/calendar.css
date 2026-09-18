@@ -16,6 +16,10 @@
 
 body {
   margin: 0;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--text);
@@ -28,6 +32,7 @@ body {
   position: sticky;
   top: 0;
   z-index: 10;
+  flex: 0 0 auto;
 }
 
 .topbar h1 {
@@ -265,8 +270,14 @@ body {
 
 main {
   padding: 12px 24px;
+  width: 100%;
   max-width: 1600px;
   margin: 0 auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .status-bar {
@@ -288,6 +299,7 @@ main {
   gap: 6px;
   margin-bottom: 6px;
 }
+.calendar-weekdays.hidden { display: none; }
 
 .calendar-weekdays > div {
   text-align: center;
@@ -300,10 +312,58 @@ main {
 .calendar-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
   gap: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .calendar-grid.is-loading { pointer-events: none; }
+
+.calendar-grid.year-view {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.year-month {
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+}
+.year-month h3 { margin: 0 0 6px; font-size: 13px; color: var(--text); }
+.year-weekdays, .year-days { display: grid; gap: 2px; }
+.year-days { height: calc(100% - 30px); grid-auto-rows: minmax(0, 1fr); }
+.year-weekdays { margin-bottom: 2px; color: var(--muted); font-size: 9px; text-align: center; }
+.year-day {
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 4px;
+  padding: 2px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+}
+.year-day:hover { background: var(--panel-alt); color: var(--text); }
+.year-day.empty { visibility: hidden; }
+.year-day small { display: block; min-height: 9px; margin-top: 1px; overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.year-day.good { background: rgba(54,179,126,0.18); color: var(--good); }
+.year-day.warn { background: rgba(255,171,0,0.18); color: var(--warn); }
+.year-day.bad { background: rgba(241,91,80,0.18); color: var(--bad); }
+.year-day.oof { background: rgba(76,154,255,0.18); color: var(--accent); }
+.year-day.vacation { background: rgba(168, 120, 255, 0.2); color: #c6a8ff; }
+.year-day.holiday { outline: 1px solid rgba(255,171,0,0.55); }
+.year-day.today { box-shadow: 0 0 0 1px var(--accent) inset; }
+.year-day.selected { box-shadow: 0 0 0 1px var(--warn) inset; }
+.loading-year-month { min-height: 178px; }
+.year-loading { height: 130px; border-radius: 6px; background: linear-gradient(90deg, var(--panel-alt), rgba(76,154,255,.12), var(--panel-alt)); background-size: 200% 100%; animation: loading-shimmer 1.3s infinite; }
 
 .loading-cell {
   cursor: default;
@@ -349,7 +409,8 @@ main {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  min-height: 96px;
+  min-height: 0;
+  overflow: hidden;
   padding: 8px;
   cursor: pointer;
   display: flex;
@@ -384,6 +445,7 @@ main {
 .day-cell.selected { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; }
 .bulk-panel{position:fixed;right:20px;bottom:20px;z-index:50;width:min(440px,calc(100vw - 40px));max-height:70vh;overflow:auto;background:var(--panel);border:1px solid var(--warn);border-radius:10px;padding:14px;box-shadow:0 12px 35px rgba(0,0,0,.5)}.bulk-panel.hidden{display:none}.bulk-panel header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px}.bulk-panel h3{margin:0 0 3px;font-size:15px}.bulk-panel header span{font-size:11px;color:var(--muted)}.bulk-summary{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}.bulk-summary-row{padding:7px 9px;background:var(--panel-alt);border-radius:6px;font-size:11px;color:var(--muted)}.bulk-actions{display:flex;justify-content:flex-end;gap:8px}.bulk-actions.hidden{display:none}.bulk-actions button,.bulk-worklog-form button{border:1px solid var(--border);border-radius:6px;background:var(--panel-alt);color:var(--text);padding:7px 10px;cursor:pointer}.bulk-actions button.primary,.bulk-worklog-form button.primary{background:var(--accent);border-color:var(--accent);color:#05101f;font-weight:600}.bulk-worklog-form{display:flex;flex-direction:column;gap:10px}.bulk-worklog-form.hidden{display:none}.bulk-worklog-form label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted)}.bulk-worklog-form input,.bulk-worklog-form select,.bulk-worklog-form textarea{background:var(--panel-alt);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:7px;font:inherit}.bulk-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}.bulk-panel .form-error{margin:8px 0}
 .day-cell.oof { background: rgba(76,154,255,0.08); }
+.day-cell.vacation { background: rgba(168, 120, 255, 0.1); }
 .day-cell.holiday { background: rgba(255,171,0,0.07); }
 .day-cell.holiday-blocked { border-color: rgba(255,171,0,0.5); }
 
@@ -406,7 +468,8 @@ main {
 .hours-badge.bad { background: rgba(241,91,80,0.18); color: var(--bad); }
 .hours-badge.none { background: transparent; color: var(--muted); font-weight: 400; }
 .hours-badge.oof-badge { background: rgba(76,154,255,0.18); color: var(--accent); }
-.hours-badge.holiday-badge { background: rgba(255,171,0,0.18); color: var(--warn); font-size: 11px; }
+.hours-badge.vacation-badge { background: rgba(168, 120, 255, 0.2); color: #c6a8ff; }
+.hours-badge.holiday-badge { max-width: 100%; overflow: hidden; background: rgba(255,171,0,0.18); color: var(--warn); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .holiday-settings { display: flex; align-items: end; gap: 8px; }
 .holiday-settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
 .holiday-settings select { background: var(--panel-alt); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px; font: inherit; }
@@ -426,10 +489,31 @@ main {
 .settings-section .checkbox-group { align-items: flex-start; flex-direction: column; gap: 12px; }
 .settings-section .expected-hours { margin-top: 14px; display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
 .settings-section .expected-hours input, .working-periods input { width: 140px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px; font: inherit; }
+.calendar-number-settings { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.calendar-number-settings > .expected-hours, .vacation-entitlement-setting { margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-alt); }
+.settings-section .calendar-number-settings > .expected-hours { margin-top: 0; gap: 8px; justify-content: space-between; }
+.vacation-entitlement-setting label { height: 100%; display: flex; flex-direction: column; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; }
+.setting-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.setting-year-badge { padding: 2px 8px; border-radius: 999px; background: rgba(76,154,255,.14); color: var(--accent); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.entitlement-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.calendar-number-settings input, .vacation-entitlement-setting input { width: 100%; height: 34px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px; font: inherit; }
+.entitlement-input > span { font-size: 11px; color: var(--muted); }
 .working-periods { display: flex; gap: 12px; }
 .working-periods label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 12px; }
 .settings-section .holiday-settings { align-items: stretch; flex-direction: column; }
 .settings-section .holiday-settings select { width: 100%; }
+.manual-holiday-editor { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.manual-holiday-fields { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 7px; }
+.manual-holiday-fields input, .manual-holiday-fields button { min-width: 0; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px; font: inherit; font-size: 12px; }
+.manual-holiday-fields button { cursor: pointer; }
+.manual-holiday-fields button:hover { border-color: var(--accent); }
+.manual-holiday-list { display: flex; flex-direction: column; gap: 5px; max-height: 150px; margin-top: 9px; overflow-y: auto; }
+.manual-holiday-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; background: var(--panel-alt); color: var(--muted); font-size: 11px; }
+.manual-holiday-remove { flex: 0 0 auto; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.manual-holiday-remove:hover { color: var(--bad); }
+.manual-holiday-empty { color: var(--muted); font-size: 11px; }
+#manualHolidayError { margin-top: 7px; }
+#manualHolidayError.hidden { display: none; }
 .settings-section .data-actions { justify-content: flex-start; }
 
 .day-cell .issue-list {
@@ -459,7 +543,7 @@ main {
   border: 1px dashed var(--muted);
 }
 
-.week-view .day-cell { min-height: 220px; }
+.week-view .day-cell { min-height: 0; }
 .week-view .day-cell .issue-list .week-chip {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) auto;
@@ -474,32 +558,36 @@ main {
 .week-chip .chip-hours { color: var(--text); font-variant-numeric: tabular-nums; }
 
 .summary-panel {
-  margin-top: 14px;
+  margin-top: 8px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 10px 20px;
+  padding: 8px 16px;
+  flex: 0 0 auto;
 }
 
 .summary-panel h2 {
-  margin: 0 0 10px;
+  margin: 0;
   font-size: 15px;
 }
+.summary-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 7px; }
+.summary-header button { margin: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-alt); color: var(--text); padding: 4px 8px; cursor: pointer; font: inherit; font-size: 11px; }
+.summary-header button.hidden { display: none; }
 
 #summaryContent {
   display: flex;
   align-items: stretch;
-  gap: 24px;
-  flex-wrap: wrap;
+  gap: 14px;
+  flex-wrap: nowrap;
 }
 
 .summary-block {
   display: flex;
   align-items: flex-start;
-  gap: 24px;
-  flex-wrap: wrap;
+  gap: 14px;
+  flex-wrap: nowrap;
   flex: 1 1 420px;
-  min-width: 360px;
+  min-width: 0;
 }
 
 .summary-block-main {
@@ -519,7 +607,7 @@ main {
 
 .summary-stats {
   display: flex;
-  gap: 24px;
+  gap: 16px;
   flex-wrap: nowrap;
   flex-shrink: 0;
 }
@@ -548,7 +636,9 @@ main {
   gap: 8px;
   flex-wrap: wrap;
   flex: 1;
-  min-width: 160px;
+  min-width: 0;
+  max-height: 48px;
+  overflow: auto;
 }
 
 .missing-days .missing-label { white-space: nowrap; }
@@ -652,6 +742,14 @@ main {
 }
 .oof-toggle input { cursor: pointer; }
 #oofToggleWrapper.hidden { display: none; }
+.absence-label { margin-bottom: 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.absence-selector { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.absence-selector button { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); padding: 7px 9px; cursor: pointer; font: inherit; font-size: 12px; }
+.absence-selector button:hover { color: var(--text); background: var(--panel-alt); }
+.absence-selector button.active { color: var(--text); border-color: var(--border); background: var(--panel-alt); box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+.absence-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
+.absence-dot.oof { background: var(--accent); }
+.absence-dot.vacation { background: #b58cff; }
 .entry-row .time { font-weight: 600; white-space: nowrap; }
 .entry-row .entry-actions { display: flex; gap: 6px; align-items: center; }
 .entry-row .entry-actions button {

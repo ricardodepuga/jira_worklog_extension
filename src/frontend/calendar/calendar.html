@@ -18,6 +18,7 @@
         </div>
 
         <div class="view-toggle">
+          <button id="viewYearBtn" class="toggle-btn">Year</button>
           <button id="viewMonthBtn" class="toggle-btn active">Month</button>
           <button id="viewWeekBtn" class="toggle-btn">Week</button>
         </div>
@@ -68,10 +69,18 @@
           </label>
         </div>
 
-        <label class="expected-hours">
-          Expected hours/day
-          <input id="expectedHoursInput" type="number" min="0.5" max="24" step="0.5" value="7" />
-        </label>
+        <div class="calendar-number-settings">
+          <label class="expected-hours">
+            Expected hours/day
+            <input id="expectedHoursInput" type="number" min="0.5" max="24" step="0.5" value="7" />
+          </label>
+          <div class="vacation-entitlement-setting">
+            <label>
+              <span class="setting-label-row"><span>Annual vacation</span><span id="annualVacationYearLabel" class="setting-year-badge"></span></span>
+              <span class="entitlement-input"><input id="annualVacationDaysInput" type="number" min="0" max="366" step="1" value="22" /><span>days</span></span>
+            </label>
+          </div>
+        </div>
       </section>
 
       <section class="settings-section">
@@ -118,6 +127,15 @@
             </select>
           </label>
         </div>
+        <div class="manual-holiday-editor">
+          <div class="manual-holiday-fields">
+            <input id="manualHolidayDateInput" type="date" aria-label="Holiday date" />
+            <input id="manualHolidayNameInput" type="text" maxlength="80" placeholder="Holiday name" aria-label="Holiday name" />
+            <button type="button" id="addManualHolidayBtn">Add</button>
+          </div>
+          <div id="manualHolidayError" class="form-error hidden"></div>
+          <div id="manualHolidayList" class="manual-holiday-list"></div>
+        </div>
       </section>
 
       <section class="settings-section">
@@ -144,7 +162,10 @@
     <div id="calendarGrid" class="calendar-grid"></div>
 
     <section id="summaryPanel" class="summary-panel">
-      <h2>Period summary</h2>
+      <div class="summary-header">
+        <h2>Period summary</h2>
+        <button type="button" id="vacationSummaryToggle" class="hidden">Vacation details</button>
+      </div>
       <div id="summaryContent"></div>
     </section>
   </main>
@@ -171,6 +192,7 @@
     <div id="bulkError" class="form-error hidden"></div>
     <div id="bulkActions" class="bulk-actions">
       <button type="button" id="bulkOofBtn">Mark OOF</button>
+      <button type="button" id="bulkVacationBtn">Mark vacation</button>
       <button type="button" id="bulkWorklogBtn" class="primary">Add worklog</button>
     </div>
     <div id="bulkWorklogForm" class="bulk-worklog-form hidden">
