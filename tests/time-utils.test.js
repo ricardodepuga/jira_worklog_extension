@@ -32,3 +32,36 @@ test('honours a configured morning start and splits remaining work in half-hour 
     { issueKey: 'APP-2', time: '12:00', seconds: 12600 },
   ]);
 });
+
+test('excludes tasks that were already in review before the auto-log date', () => {
+  const plan = time.planAutoWorklogs([
+    { key: 'APP-OLD-REVIEW', isReview: true, reviewMinute: null },
+    { key: 'APP-ACTIVE', isReview: false, reviewMinute: null },
+  ], 7, '09:00');
+
+  assert.deepEqual(plan, [
+    { issueKey: 'APP-ACTIVE', time: '09:00', seconds: 25200 },
+  ]);
+});
+
+test('uses assignment history for both today and past dates', () => {
+  assert.equal(time.shouldUseAssignmentHistory('2026-09-23', '2026-09-23'), true);
+  assert.equal(time.shouldUseAssignmentHistory('2026-09-22', '2026-09-23'), true);
+  assert.equal(time.shouldUseAssignmentHistory('2026-09-24', '2026-09-23'), false);
+});
+
+test('keeps a dated in-progress task after it was reassigned to QA', () => {
+  assert.equal(time.isDatedIssueEligible({
+    statusCategoryName: 'In Progress',
+    wasAssignedOnDate: true,
+    assigneeAtEndOfDay: 'qa-account',
+    requestedAccountId: 'developer-account',
+  }), true);
+
+  assert.equal(time.isDatedIssueEligible({
+    statusCategoryName: 'Done',
+    wasAssignedOnDate: true,
+    assigneeAtEndOfDay: 'qa-account',
+    requestedAccountId: 'developer-account',
+  }), false);
+});

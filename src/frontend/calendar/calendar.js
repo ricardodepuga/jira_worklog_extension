@@ -272,9 +272,29 @@ function setStatus(msg, isError) {
   els.statusBar.classList.toggle('error', !!isError);
 }
 
+function setApiError(error, prefix = '') {
+  if (error.code !== 'JIRA_AUTH_REQUIRED' || !error.site) {
+    setStatus(`${prefix}${error.message}`, true);
+    return;
+  }
+  const link = document.createElement('a');
+  link.href = `https://${error.site}`;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.textContent = 'Open Jira login';
+  els.statusBar.replaceChildren(document.createTextNode(`${prefix}${error.message} `), link);
+  els.statusBar.classList.remove('hidden');
+  els.statusBar.classList.add('error');
+}
+
 async function api(path, options) {
   const response = await chrome.runtime.sendMessage({ type: 'api', path, options: options || {} });
-  if (!response?.ok) throw new Error(response?.error || 'Extension service unavailable.');
+  if (!response?.ok) {
+    const error = new Error(response?.error || 'Extension service unavailable.');
+    error.code = response?.code;
+    error.site = response?.site;
+    throw error;
+  }
   return response.data;
 }
 
@@ -525,6 +545,12 @@ function wireCalendarDayInteractions(selector) {
   });
 }
 
+function monthChipLimit() {
+  if (window.innerHeight < 850) return 1;
+  if (window.innerHeight < 1050) return 2;
+  return 3;
+}
+
 function renderYearGrid() {
   const year = state.anchor.getFullYear();
   const hideWeekends = weekendsHiddenNow();
@@ -614,13 +640,13 @@ function renderGrid() {
           ? `<span class="hours-badge ${badgeClass(hours, state.expectedHours, weekend)}">${fmtHours(hours)}</span>`
           : `<span class="hours-badge none">—</span>`;
 
-      const maxChips = state.view === 'week' ? entries.length : 3;
+      const maxChips = state.view === 'week' ? entries.length : monthChipLimit();
       const visibleEntries = entries.slice(0, maxChips);
       const hiddenCount = entries.length - visibleEntries.length;
       const chipHtml = visibleEntries
         .map((e) => state.view === 'week'
-          ? `<span class="chip week-chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}"><span class="chip-time">${extractTime(e.started)}</span><span class="chip-key">${escapeHtml(e.issueKey)}</span><span class="chip-summary">${escapeHtml(e.issueSummary)}</span><span class="chip-hours">${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' 🤖' : ''}</span></span>`
-          : `<span class="chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}">${escapeHtml(e.issueKey)} · ${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' 🤖' : ''}</span>`)
+          ? `<span class="chip week-chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}"><span class="chip-time">${extractTime(e.started)}</span><span class="chip-key">${escapeHtml(e.issueKey)}</span><span class="chip-summary">${escapeHtml(e.issueSummary)}</span><span class="chip-hours">${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' <span class="auto-indicator" aria-label="Auto-logged">🤖</span>' : ''}</span></span>`
+          : `<span class="chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}">${escapeHtml(e.issueKey)} · ${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' <span class="auto-indicator" aria-label="Auto-logged">🤖</span>' : ''}</span>`)
         .join('');
       const moreChip = hiddenCount > 0 ? `<span class="chip chip-more">+${hiddenCount} more</span>` : '';
       const extra = `<div class="issue-list">${chipHtml || moreChip ? chipHtml + moreChip : (state.view === 'week' ? '<span class="chip" style="opacity:.5">No entries</span>' : '')}</div>`;
@@ -636,6 +662,13 @@ function renderGrid() {
   els.calendarGrid.innerHTML = cells.join('');
   wireCalendarDayInteractions('.day-cell[data-date]');
 }
+
+let resizeRenderFrame;
+window.addEventListener('resize', () => {
+  if (state.view !== 'month') return;
+  cancelAnimationFrame(resizeRenderFrame);
+  resizeRenderFrame = requestAnimationFrame(renderGrid);
+});
 
 function renderLoadingGrid() {
   if (state.view === 'year') {
@@ -698,7 +731,7 @@ function removeOptimisticEntry(dateStr, worklogId) {
   pendingOptimisticEntries.delete(String(worklogId));
   forEachDateMap((map) => {
     if (!map[dateStr]) return;
-    map[dateStr] = map[dateStr].filter((e) => e.worklogId !== worklogId);
+    map[dateStr] = map[dateStr].filter((e) => String(e.worklogId) !== String(worklogId));
   });
 }
 
@@ -981,10 +1014,9 @@ function entryRowHtml(e, overlaps) {
   const endTime = addHoursToTime(startTime, secondsToHours(e.seconds));
   return `<div class="entry-row${overlaps ? ' overlaps' : ''}" data-worklog-id="${escapeHtml(String(e.worklogId || ''))}" data-issue-key="${escapeHtml(e.issueKey)}" data-seconds="${Number(e.seconds) || 0}" data-started="${escapeHtml(e.started || '')}" data-comment="${escapeHtml(e.comment || '')}">
     <div class="entry-main">
-      ${issueLinkOpen}<span class="issue-key">${escapeHtml(e.issueKey)}</span>
+      ${issueLinkOpen}<span class="issue-key">${escapeHtml(e.issueKey)}${e.autoLogged ? ' <span class="auto-indicator" title="Created automatically by the auto-logwork scheduler" aria-label="Auto-logged">🤖</span>' : ''}</span>
       <span class="summary">${escapeHtml(e.issueSummary)}</span>${issueLinkClose}
       <span class="entry-time-range"${overlaps ? ' title="Overlaps with another worklog this day"' : ''}>${startTime}–${endTime}</span>
-      ${e.autoLogged ? `<span class="auto-tag" title="Created automatically by the auto-logwork scheduler">auto</span>` : ''}
       ${e.comment ? `<span class="comment">${escapeHtml(e.comment)}</span>` : ''}
       ${taskDetails.length ? `<span class="task-details">${taskDetails.join(' · ')}</span>` : ''}
     </div>
@@ -1147,16 +1179,32 @@ async function deleteEntry(row, dateStr) {
   const issueKey = row.dataset.issueKey;
   const worklogId = row.dataset.worklogId;
   if (!confirm(`Delete the worklog entry for ${issueKey}?`)) return;
+  const actionButtons = Array.from(row.querySelectorAll('.entry-actions button'));
+  const deleteBtn = row.querySelector('.delete-entry-btn');
+  row.classList.add('is-processing');
+  row.setAttribute('aria-busy', 'true');
+  actionButtons.forEach((button) => { button.disabled = true; });
+  if (deleteBtn) {
+    deleteBtn.classList.add('is-loading');
+    deleteBtn.textContent = 'Deleting…';
+  }
   try {
     await api(`/api/worklogs/${encodeURIComponent(issueKey)}/${encodeURIComponent(worklogId)}?accountId=${encodeURIComponent(state.me.accountId)}`, {
       method: 'DELETE',
     });
     removeOptimisticEntry(dateStr, worklogId);
-    els.dayDialog.close();
     renderGrid();
     renderSummary();
+    renderDayDialogBody(dateStr);
     reconcileWithJiraAfterWrite();
   } catch (err) {
+    row.classList.remove('is-processing');
+    row.removeAttribute('aria-busy');
+    actionButtons.forEach((button) => { button.disabled = false; });
+    if (deleteBtn) {
+      deleteBtn.classList.remove('is-loading');
+      deleteBtn.textContent = 'Delete';
+    }
     alert(`Could not delete: ${err.message}`);
   }
 }
@@ -1548,7 +1596,7 @@ async function fetchWorklogRange(rangeStart, rangeEnd) {
     );
     return mergePendingOptimisticEntries(data.byDate || {}, fmtDate(rangeStart), fmtDate(rangeEnd));
   } catch (err) {
-    setStatus(`Error loading worklogs: ${err.message}`, true);
+    setApiError(err, 'Error loading worklogs: ');
     return {};
   }
 }
@@ -2011,7 +2059,7 @@ async function loadSettings() {
   try {
     await loadMe();
   } catch (err) {
-    setStatus(`Error loading default user: ${err.message}`, true);
+    setApiError(err);
     return;
   }
   await loadSettings();

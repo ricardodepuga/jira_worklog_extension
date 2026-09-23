@@ -6,10 +6,30 @@ const today = () => {
 };
 async function api(path, options = {}) {
   const response = await chrome.runtime.sendMessage({ type: 'api', path, options });
-  if (!response?.ok) throw new Error(response?.error || 'Extension service unavailable.');
+  if (!response?.ok) {
+    const error = new Error(response?.error || 'Extension service unavailable.');
+    error.code = response?.code;
+    error.site = response?.site;
+    throw error;
+  }
   return response.data;
 }
 $('calendar').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('src/frontend/calendar/calendar.html') });
+
+function showError(error) {
+  const status = $('status');
+  status.className = 'error';
+  if (error.code !== 'JIRA_AUTH_REQUIRED' || !error.site) {
+    status.textContent = error.message;
+    return;
+  }
+  const link = document.createElement('a');
+  link.href = `https://${error.site}`;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.textContent = 'Open Jira login';
+  status.replaceChildren(document.createTextNode(`${error.message} `), link);
+}
 
 function formatTimeLabel(time) { return time.replace(/^0/, ''); }
 function applyWorkingPeriods(settings) {
@@ -95,8 +115,7 @@ async function loadWorklogForm() {
       $('status').textContent = 'Worklog added successfully.';
       $('comment').value = '';
     } catch (error) {
-      $('status').textContent = error.message;
-      $('status').className = 'error';
+      showError(error);
     } finally {
       $('save').disabled = false;
     }
@@ -120,8 +139,7 @@ $('setupForm').onsubmit = async (event) => {
     $('setupToken').value = '';
     await loadWorklogForm();
   } catch (error) {
-    $('status').textContent = error.message;
-    $('status').className = 'error';
+    showError(error);
   } finally {
     $('connect').disabled = false;
   }
@@ -136,8 +154,7 @@ async function init() {
     }
     await loadWorklogForm();
   } catch (error) {
-    $('status').textContent = error.message;
-    $('status').className = 'error';
+    showError(error);
   }
 }
 init();

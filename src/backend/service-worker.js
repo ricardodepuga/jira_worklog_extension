@@ -1,6 +1,6 @@
 importScripts('../shared/time-utils.js');
 
-const { effectiveTimeZone, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, planAutoWorklogs } = globalThis.JiraLogWorkTime;
+const { effectiveTimeZone, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, shouldUseAssignmentHistory, isDatedIssueEligible, planAutoWorklogs } = globalThis.JiraLogWorkTime;
 
 const DEFAULTS = {
   config: { site: '', email: '', apiToken: '' },
@@ -122,20 +122,105 @@ function validateSite(site) {
   }
 }
 
-async function jiraFetch(pathname, options = {}) {
-  const { config } = await stored();
-  if (!config.site || !config.email || !config.apiToken) throw new Error('NOT_CONFIGURED');
-  const response = await fetch(`https://${config.site}/rest/api/3${pathname}`, {
+const jiraApiBaseBySite = new Map();
+const jiraCloudIdBySite = new Map();
+const jiraSessionSites = new Set();
+
+function directJiraApiBase(site) {
+  return `https://${site}/rest/api/3`;
+}
+
+async function scopedJiraApiBase(site) {
+  if (!jiraCloudIdBySite.has(site)) {
+    const response = await fetch(`https://${site}/_edge/tenant_info`, {
+      credentials: 'omit',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) throw new Error('Could not determine the Jira Cloud ID.');
+    const data = await response.json();
+    if (!data.cloudId) throw new Error('The Jira site did not return a Cloud ID.');
+    jiraCloudIdBySite.set(site, data.cloudId);
+  }
+  return `https://api.atlassian.com/ex/jira/${encodeURIComponent(jiraCloudIdBySite.get(site))}/rest/api/3`;
+}
+
+function jiraRequest(base, pathname, options, authorization = null, credentials = 'omit') {
+  return fetch(`${base}${pathname}`, {
     ...options,
+    credentials,
+    cache: 'no-store',
     headers: {
-      Authorization: `Basic ${btoa(`${config.email}:${config.apiToken}`)}`,
       Accept: 'application/json',
       'Content-Type': 'application/json',
+      ...(authorization ? { Authorization: authorization } : {}),
       ...(options.headers || {}),
     },
   });
+}
+
+function jiraConnectionError(site, status) {
+  const error = new Error(status === 403 ? 'Jira denied access.' : 'Jira sign-in required.');
+  error.code = 'JIRA_AUTH_REQUIRED';
+  error.site = site;
+  return error;
+}
+
+async function jiraFetch(pathname, options = {}) {
+  const { config } = await stored();
+  if (!config.site || !config.email || !config.apiToken) throw new Error('NOT_CONFIGURED');
+  const directBase = directJiraApiBase(config.site);
+  const cachedBase = jiraApiBaseBySite.get(config.site);
+  let activeBase = cachedBase || directBase;
+  const authorization = `Basic ${btoa(`${config.email}:${config.apiToken}`)}`;
+  let response;
+
+  // If this service-worker lifetime has already authenticated through the Jira
+  // browser session, use it first. Should that session expire, fall back to the
+  // configured API token paths below.
+  if (jiraSessionSites.has(config.site)) {
+    response = await jiraRequest(directBase, pathname, options, null, 'include');
+    if (!response.ok && [401, 403].includes(response.status)) jiraSessionSites.delete(config.site);
+  }
+
+  if (!response?.ok) response = await jiraRequest(activeBase, pathname, options, authorization);
+
+  // Classic tokens use the site URL. Scoped tokens use Atlassian's API
+  // gateway and the site's Cloud ID. Atlassian does not expose the token type,
+  // so try the alternate official endpoint only after an authentication error.
+  if (response.status === 401 || (!cachedBase && response.status === 403)) {
+    try {
+      const alternateBase = activeBase === directBase
+        ? await scopedJiraApiBase(config.site)
+        : directBase;
+      if (alternateBase !== activeBase) {
+        const alternateResponse = await jiraRequest(alternateBase, pathname, options, authorization);
+        response = alternateResponse;
+        activeBase = alternateBase;
+      }
+    } catch (error) {
+      console.warn('Could not try the alternate Jira API endpoint:', error);
+    }
+  }
+
+  // Keep the former, useful behaviour as a final fallback: when neither token
+  // endpoint accepts the credentials, an existing Jira browser session can
+  // still authorize the extension. This request deliberately has no Basic
+  // Authorization header, so Jira can evaluate its session cookie instead.
+  if (!response.ok && [401, 403].includes(response.status)) {
+    try {
+      const sessionResponse = await jiraRequest(directBase, pathname, options, null, 'include');
+      if (sessionResponse.ok || sessionResponse.status === 403) response = sessionResponse;
+      if (sessionResponse.ok) jiraSessionSites.add(config.site);
+    } catch (error) {
+      console.warn('Could not try the Jira browser session:', error);
+    }
+  }
+
+  if (response.ok && !jiraSessionSites.has(config.site)) jiraApiBaseBySite.set(config.site, activeBase);
   if (!response.ok) {
     const body = await response.text().catch(() => '');
+    if (response.status === 401 || response.status === 403) throw jiraConnectionError(config.site, response.status);
     throw new Error(`Jira API ${response.status} ${response.statusText}: ${body.slice(0, 400)}`);
   }
   return response.status === 204 ? null : response.json();
@@ -336,7 +421,7 @@ async function fetchIssueChangelog(issueKey) {
   return histories;
 }
 
-async function wasEligibleAtEndOfDay(issue, date, accountId) {
+async function wasEligibleAtDateCutoff(issue, date) {
   const [state, statuses, histories] = await Promise.all([
     stored(),
     getJiraStatuses(),
@@ -345,7 +430,6 @@ async function wasEligibleAtEndOfDay(issue, date, accountId) {
   const cutoff = instantForZonedDateTime(date, '23:59', effectiveTimeZone(state.me?.timeZone)) + 59999;
   let statusId = issue.fields?.status?.id || null;
   let statusName = issue.fields?.status?.name || null;
-  let assigneeId = issue.fields?.assignee?.accountId || null;
   const ordered = histories.slice().sort((a, b) => new Date(b.created) - new Date(a.created));
   for (const history of ordered) {
     if (new Date(history.created).getTime() <= cutoff) continue;
@@ -354,24 +438,25 @@ async function wasEligibleAtEndOfDay(issue, date, accountId) {
       statusId = item.from || null;
       statusName = item.fromString || null;
     }
-    for (const item of history.items || []) {
-      if (String(item.field).toLowerCase() !== 'assignee') continue;
-      assigneeId = item.from || null;
-    }
   }
   const status = statuses.find((candidate) =>
     (statusId && String(candidate.id) === String(statusId)) ||
     (!statusId && statusName && candidate.name === statusName)
   );
-  return status?.statusCategory?.name === 'In Progress' && assigneeId === accountId;
+  return isDatedIssueEligible({
+    statusCategoryName: status?.statusCategory?.name,
+    // The dated JQL candidate set already guarantees this condition.
+    wasAssignedOnDate: true,
+  });
 }
 
 async function searchIssues(accountId, date, query = '') {
-  const historical = /^\d{4}-\d{2}-\d{2}$/.test(date) && date < todayStr();
+  const today = todayStr();
+  const datedAssignment = shouldUseAssignmentHistory(date, today);
   let jql;
-  if (historical) {
-    // Do not pre-filter historical status through JQL. That index can miss
-    // unchanged/renamed statuses; the changelog below is the source of truth.
+  if (datedAssignment) {
+    // Do not pre-filter dated status through JQL. The changelog/current status
+    // below is the source of truth, while WAS keeps tasks reassigned that day.
     jql = `assignee WAS "${accountId}" ON "${date}" ORDER BY updated DESC`;
   } else {
     jql = `assignee = "${accountId}" AND statusCategory = "In Progress" ORDER BY updated DESC`;
@@ -384,21 +469,23 @@ async function searchIssues(accountId, date, query = '') {
       : `summary ~ "${escaped}*"`;
     jql = jql.replace(' ORDER BY updated DESC', ` AND ${filter} ORDER BY updated DESC`);
   }
-  const data = await jiraFetch('/search/jql', { method: 'POST', body: JSON.stringify({ jql, fields: ['summary', 'status', 'project', 'assignee'], maxResults: 100 }) });
+  const data = await jiraFetch('/search/jql', { method: 'POST', body: JSON.stringify({ jql, fields: ['summary', 'status', 'project'], maxResults: 100 }) });
   const candidates = data.issues || [];
-  const issues = historical
-    ? (await Promise.all(candidates.map(async (issue) => ({ issue, eligible: await wasEligibleAtEndOfDay(issue, date, accountId) })))).filter((result) => result.eligible).map((result) => result.issue)
-    : candidates;
+  const issues = !datedAssignment
+    ? candidates
+    : date === today
+      // For today, Jira already returns the current status category. Avoid a
+      // changelog request per suggestion; only past dates need reconstruction.
+      ? candidates.filter((issue) => isDatedIssueEligible({
+        statusCategoryName: issue.fields?.status?.statusCategory?.name,
+        wasAssignedOnDate: true,
+      }))
+      : (await Promise.all(candidates.map(async (issue) => ({ issue, eligible: await wasEligibleAtDateCutoff(issue, date) })))).filter((result) => result.eligible).map((result) => result.issue);
   return issues.map((i) => ({ key: i.key, summary: i.fields?.summary || '', status: i.fields?.status?.name || '', projectKey: i.fields?.project?.key || '' }));
 }
 
-async function inProgressIssues(accountId) {
-  const jql = `assignee = "${accountId}" AND statusCategory = "In Progress" ORDER BY updated DESC`;
-  const data = await jiraFetch('/search/jql', {
-    method: 'POST',
-    body: JSON.stringify({ jql, fields: ['summary', 'status'], maxResults: 50 }),
-  });
-  return (data.issues || []).map((issue) => ({ key: issue.key, summary: issue.fields?.summary || '', status: issue.fields?.status?.name || '' }));
+async function inProgressIssues(accountId, date) {
+  return searchIssues(accountId, date);
 }
 
 let storyPointsFieldId;
@@ -441,7 +528,10 @@ async function handleApi(path, options = {}) {
     await chrome.storage.local.set({ config: { ...DEFAULTS.config }, me: null });
     return { ok: true };
   }
-  if (url.pathname === '/api/me') return state.me || resolveMe();
+  // Always validate the saved token when a popup/calendar session starts.
+  // `me` remains cached for background jobs, but must not be treated as proof
+  // that credentials which worked previously are still valid now.
+  if (url.pathname === '/api/me') return resolveMe();
   if (url.pathname === '/api/settings' && (!options.method || options.method === 'GET')) return state.settings;
   if (url.pathname === '/api/settings' && options.method === 'POST') {
     const settings = await updateSettings(body);
@@ -502,7 +592,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'api') return false;
   handleApi(message.path, message.options || {})
     .then((data) => sendResponse({ ok: true, data }))
-    .catch((error) => sendResponse({ ok: false, error: error.message }));
+    .catch((error) => sendResponse({ ok: false, error: error.message, code: error.code, site: error.site }));
   return true;
 });
 
@@ -523,6 +613,7 @@ async function reviewTransitionMinute(issue, date, timeZone) {
 async function autoPlan(issues, hours, date, timeZone, morningStart) {
   const enriched = await Promise.all(issues.map(async (issue) => ({
     ...issue,
+    isReview: /review/i.test(issue.status),
     reviewMinute: await reviewTransitionMinute(issue, date, timeZone),
   })));
   return planAutoWorklogs(enriched, hours, morningStart, HALF_HOUR_SECONDS);
@@ -537,7 +628,7 @@ async function runAutoLog() {
   if (await excludedHolidayForDate(date)) return;
   const existing = await getWorklogs(state.me.accountId, date, date);
   if ((existing.byDate[date] || []).length) return;
-  const inProgress = await inProgressIssues(state.me.accountId);
+  const inProgress = await inProgressIssues(state.me.accountId, date);
   const plan = await autoPlan(inProgress, state.settings.expectedHours, date, effectiveTimeZone(state.me?.timeZone), state.settings.morningStart);
   for (const item of plan) {
     // The user may disable auto-log while Jira queries are still in flight.

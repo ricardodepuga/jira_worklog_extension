@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-09-23
+
+### Fixed
+
+- Manual suggestions for past dates and today retain in-progress tasks that were reassigned after the user worked on them.
+- Auto-log now also considers tasks assigned earlier that day and preserves the existing Review transition time cap.
+- Added automatic support for both classic and scoped Atlassian API tokens without relying on the Jira browser session.
+- Simplified authentication and permission error messages.
+- Restored the Jira browser session as a final authentication fallback and added a direct login link when no authentication method succeeds.
+
+## [1.6.1] - 2026-09-18
+
+### Fixed
+
+- Prevented tasks already in Review before the current day from receiving automatic worklogs.
+- Restored compact monthly worklog rows without premature or inset page scrolling.
+- Kept automatic worklog rows the same size as manual rows while preserving the robot indicator.
+- Kept the daily-details dialog open after deletion and added visible deletion progress feedback.
+
 ## [1.6.0] - 2026-09-18
 
 ### Added

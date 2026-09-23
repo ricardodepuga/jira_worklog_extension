@@ -292,6 +292,7 @@ main {
 
 .status-bar.hidden { display: none; }
 .status-bar.error { color: var(--bad); border-color: var(--bad); }
+.status-bar a { color: var(--accent); }
 
 .calendar-weekdays {
   display: grid;
@@ -320,6 +321,11 @@ main {
 }
 
 .calendar-grid.is-loading { pointer-events: none; }
+.calendar-grid:not(.week-view):not(.year-view) {
+  grid-auto-rows: minmax(0, 1fr);
+  flex: 1;
+  overflow: hidden;
+}
 
 .calendar-grid.year-view {
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -523,6 +529,7 @@ main {
   flex: 1;
   margin: 6px 0;
 }
+.calendar-grid:not(.week-view):not(.year-view) .day-cell .issue-list { overflow: hidden; }
 .day-cell .issue-list .chip {
   background: var(--panel-alt);
   border-radius: 4px;
@@ -532,6 +539,7 @@ main {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 15px;
 }
 .day-cell .issue-list .chip-more {
   color: var(--accent);
@@ -540,7 +548,41 @@ main {
 }
 
 .day-cell .issue-list .chip.auto-chip {
-  border: 1px dashed var(--muted);
+  outline: 1px dashed var(--muted);
+  outline-offset: -1px;
+}
+.auto-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 13px;
+  vertical-align: -1px;
+  text-decoration: none;
+}
+
+/* Only very short windows need scrolling. Let the document own that scroll so
+   the scrollbar stays against the browser's right edge. */
+@media (max-height: 720px) {
+  body {
+    height: auto;
+    min-height: 100vh;
+    overflow-y: auto;
+  }
+
+  main {
+    flex: 0 0 auto;
+    min-height: 660px;
+    overflow: visible;
+  }
+
+  .calendar-grid:not(.week-view):not(.year-view) {
+    grid-auto-rows: minmax(90px, 1fr);
+    overflow: visible;
+  }
 }
 
 .week-view .day-cell { min-height: 0; }
@@ -715,19 +757,6 @@ main {
 .entry-row .task-details .detail-value { color: var(--text); font-weight: 600; }
 .entry-row .entry-time-range { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .entry-row.overlaps .entry-time-range { color: var(--warn); font-weight: 600; }
-.entry-row .auto-tag {
-  align-self: flex-start;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--muted);
-  background: var(--panel-alt);
-  border: 1px dashed var(--muted);
-  border-radius: 4px;
-  padding: 1px 5px;
-}
-
 .oof-toggle {
   display: flex;
   align-items: center;
@@ -763,6 +792,21 @@ main {
 }
 .entry-row .entry-actions button:hover { border-color: var(--accent); color: var(--text); }
 .entry-row .entry-actions button.danger:hover { border-color: var(--bad); color: var(--bad); }
+.entry-row.is-processing { opacity: .58; cursor: wait; }
+.entry-row.is-processing .entry-actions button { cursor: wait; }
+.delete-entry-btn.is-loading::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border: 1px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: delete-spinner .65s linear infinite;
+}
+@keyframes delete-spinner { to { transform: rotate(360deg); } }
 .no-entries { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
 
 .readonly-note {
