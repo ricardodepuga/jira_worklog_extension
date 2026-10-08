@@ -12,23 +12,23 @@ JiraLogWork is a Chrome extension for registering Jira worklogs quickly and revi
 - Optional automatic worklog creation at 18:00 on eligible working days.
 - Public-holiday display by country, with an optional exclusion from auto-worklog and summary calculations.
 - Configurable expected daily hours and morning/afternoon start times.
-- Local import and export of OOF data.
+- Local import and export of OOF data and non-sensitive preferences.
 
 ## Privacy and data handling
 
 JiraLogWork stores its configuration, Jira API token, OOF data and preferences in `chrome.storage.local`, within the current Chrome profile. They are not synced by the extension.
 
-The extension communicates directly with the Jira Cloud site configured by the user to read issues and worklogs and to create, edit or delete worklogs requested by the user. Jira credentials are never sent to another service.
+The extension communicates with the Jira Cloud site configured by the user, or with Atlassian's official `api.atlassian.com` gateway when a scoped API token is used, to read issues and worklogs and to create, edit or delete worklogs requested by the user. If both token endpoints reject the credentials, the extension can fall back to an existing Jira browser session. Jira credentials are never sent outside Atlassian.
 
 When a public-holiday country is selected, the extension requests only that country's holiday calendar from `date.nager.at`. It does not send Jira credentials, issue information, worklogs or personal data to that service.
 
-Exported data contains OOF dates only. It never includes Jira API tokens, issues or worklogs.
+Exported data contains OOF dates and non-sensitive preferences (expected hours, work-period start times, holiday settings and weekend visibility). It never includes Jira API tokens, site/email credentials, account identity, issues, worklogs or the auto-worklog enabled state.
 
 ## Required permissions
 
 - `storage` — save configuration and OOF data locally.
 - `alarms` — run the optional auto-worklog check.
-- Jira Cloud host access — communicate with the Jira site entered by the user.
+- Jira Cloud host access — communicate with the Jira site entered by the user and Atlassian's official API gateway for scoped tokens.
 - `date.nager.at` host access — retrieve public holidays only when a country is selected.
 
 ## Configure Jira

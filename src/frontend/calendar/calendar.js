@@ -1,10 +1,12 @@
 const state = {
   me: null, // token owner: { accountId, displayName, email }
   user: null, // currently viewed user: { accountId, displayName, email }
-  view: 'month', // 'month' | 'week'
+  view: 'month', // 'month' | 'week' | 'year'
   anchor: new Date(),
-  showWeekends: false, // only affects month view
+  showWeekends: false,
   expectedHours: 7,
+  annualVacationDaysByYear: {},
+  showVacationSummary: false,
   morningStart: '09:00',
   afternoonStart: '14:00',
   jiraSite: null,
@@ -16,12 +18,39 @@ const state = {
   refreshToken: 0, // prevents slower, older Jira responses replacing the latest view
   openIssuesCache: new Map(), // per-date cached suggestions, keyed by dateStr
   oofDates: new Set(), // dates marked as out-of-office for state.user
+  vacationDates: new Set(), // dates marked as vacation for state.user
   publicHolidays: new Map(), // YYYY-MM-DD -> { name, localName }
+  manualHolidays: new Map(), // locally configured YYYY-MM-DD holidays
   holidayCountry: '',
   holidayMode: 'mark',
 };
 
 const OOF_STORAGE_KEY = 'logwork_oof_v1';
+const SETTINGS_SECTION_STATE_KEY = 'settingsSectionState';
+const OPEN_ISSUES_CACHE_TTL_MS = 60 * 1000;
+
+async function initializeSettingsSections() {
+  const sections = Array.from(document.querySelectorAll('[data-settings-section]'));
+  try {
+    const storedState = (await chrome.storage.local.get(SETTINGS_SECTION_STATE_KEY))[SETTINGS_SECTION_STATE_KEY] || {};
+    sections.forEach((section) => {
+      const key = section.dataset.settingsSection;
+      if (typeof storedState[key] === 'boolean') section.open = storedState[key];
+    });
+  } catch (error) {
+    console.error('Could not restore settings section state:', error);
+  }
+  sections.forEach((section) => {
+    section.addEventListener('toggle', async () => {
+      try {
+        const current = Object.fromEntries(sections.map((item) => [item.dataset.settingsSection, item.open]));
+        await chrome.storage.local.set({ [SETTINGS_SECTION_STATE_KEY]: current });
+      } catch (error) {
+        console.error('Could not save settings section state:', error);
+      }
+    });
+  });
+}
 
 async function loadOofDates(accountId) {
   const { oofByAccount = {} } = await chrome.storage.local.get('oofByAccount');
@@ -29,13 +58,83 @@ async function loadOofDates(accountId) {
 }
 
 async function setOofDate(accountId, dateStr, isOof) {
-  const { oofByAccount = {} } = await chrome.storage.local.get('oofByAccount');
+  const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
   const set = new Set(oofByAccount[accountId] || []);
   if (isOof) set.add(dateStr);
   else set.delete(dateStr);
   oofByAccount[accountId] = Array.from(set);
-  await chrome.storage.local.set({ oofByAccount });
+  if (isOof) {
+    const vacations = new Set(vacationByAccount[accountId] || []);
+    vacations.delete(dateStr);
+    vacationByAccount[accountId] = Array.from(vacations);
+  }
+  await chrome.storage.local.set({ oofByAccount, vacationByAccount });
   return set;
+}
+
+async function loadVacationDates(accountId) {
+  const { vacationByAccount = {} } = await chrome.storage.local.get('vacationByAccount');
+  return new Set(vacationByAccount[accountId] || []);
+}
+
+async function setVacationDate(accountId, dateStr, isVacation) {
+  const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
+  const set = new Set(vacationByAccount[accountId] || []);
+  if (isVacation) set.add(dateStr);
+  else set.delete(dateStr);
+  vacationByAccount[accountId] = Array.from(set);
+  if (isVacation) {
+    const oof = new Set(oofByAccount[accountId] || []);
+    oof.delete(dateStr);
+    oofByAccount[accountId] = Array.from(oof);
+  }
+  await chrome.storage.local.set({ oofByAccount, vacationByAccount });
+  return set;
+}
+
+async function loadManualHolidays() {
+  const { manualHolidays = {} } = await chrome.storage.local.get('manualHolidays');
+  state.manualHolidays = new Map(Object.entries(manualHolidays));
+  return state.manualHolidays;
+}
+
+async function saveManualHolidays() {
+  await chrome.storage.local.set({ manualHolidays: Object.fromEntries(state.manualHolidays) });
+}
+
+function renderManualHolidayList() {
+  const entries = [...state.manualHolidays.entries()].sort(([a], [b]) => a.localeCompare(b));
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'manual-holiday-empty';
+    empty.textContent = 'No manual holidays configured.';
+    els.manualHolidayList.replaceChildren(empty);
+    return;
+  }
+  els.manualHolidayList.replaceChildren(...entries.map(([dateStr, holiday]) => {
+    const row = document.createElement('div');
+    row.className = 'manual-holiday-row';
+    const info = document.createElement('span');
+    info.textContent = `${dateStr} · ${holiday.localName || holiday.name}`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'manual-holiday-remove';
+    remove.setAttribute('aria-label', `Remove ${holiday.localName || holiday.name}`);
+    remove.textContent = '✕';
+    remove.addEventListener('click', async () => {
+      state.manualHolidays.delete(dateStr);
+      await saveManualHolidays();
+      renderManualHolidayList();
+      updateHolidayModeAvailability();
+      await refresh();
+    });
+    row.append(info, remove);
+    return row;
+  }));
+}
+
+function updateHolidayModeAvailability() {
+  els.holidayModeInput.disabled = !state.holidayCountry && state.manualHolidays.size === 0;
 }
 
 async function migrateLegacyOofData() {
@@ -58,12 +157,16 @@ const els = {
   userSuggestions: document.getElementById('userSuggestions'),
   viewMonthBtn: document.getElementById('viewMonthBtn'),
   viewWeekBtn: document.getElementById('viewWeekBtn'),
+  viewYearBtn: document.getElementById('viewYearBtn'),
   prevBtn: document.getElementById('prevBtn'),
   nextBtn: document.getElementById('nextBtn'),
   todayBtn: document.getElementById('todayBtn'),
   periodLabel: document.getElementById('periodLabel'),
   showWeekendsInput: document.getElementById('showWeekendsInput'),
   expectedHoursInput: document.getElementById('expectedHoursInput'),
+  annualVacationDaysInput: document.getElementById('annualVacationDaysInput'),
+  annualVacationYearLabel: document.getElementById('annualVacationYearLabel'),
+  vacationSummaryToggle: document.getElementById('vacationSummaryToggle'),
   morningStartInput: document.getElementById('morningStartInput'),
   afternoonStartInput: document.getElementById('afternoonStartInput'),
   settingsBtn: document.getElementById('settingsBtn'),
@@ -72,12 +175,26 @@ const els = {
   settingsBackdrop: document.getElementById('settingsBackdrop'),
   holidayCountryInput: document.getElementById('holidayCountryInput'),
   holidayModeInput: document.getElementById('holidayModeInput'),
+  manualHolidayDateInput: document.getElementById('manualHolidayDateInput'),
+  manualHolidayNameInput: document.getElementById('manualHolidayNameInput'),
+  addManualHolidayBtn: document.getElementById('addManualHolidayBtn'),
+  manualHolidayError: document.getElementById('manualHolidayError'),
+  manualHolidayList: document.getElementById('manualHolidayList'),
   autoLogInput: document.getElementById('autoLogInput'),
   autoLogInfoIcon: document.getElementById('autoLogInfoIcon'),
+  autoLogStatus: document.getElementById('autoLogStatus'),
+  autoLogStatusFilters: document.getElementById('autoLogStatusFilters'),
+  taskListStatusFilters: document.getElementById('taskListStatusFilters'),
+  statusFilterMessage: document.getElementById('statusFilterMessage'),
+  syncStatusFiltersBtn: document.getElementById('syncStatusFiltersBtn'),
+  resetStatusFiltersBtn: document.getElementById('resetStatusFiltersBtn'),
   manageCredentialsBtn: document.getElementById('manageCredentialsBtn'),
   exportDataBtn: document.getElementById('exportDataBtn'),
   importDataBtn: document.getElementById('importDataBtn'),
   importDataInput: document.getElementById('importDataInput'),
+  diagnosticsList: document.getElementById('diagnosticsList'),
+  copyDiagnosticsBtn: document.getElementById('copyDiagnosticsBtn'),
+  clearDiagnosticsBtn: document.getElementById('clearDiagnosticsBtn'),
   statusBar: document.getElementById('statusBar'),
   calendarWeekdays: document.getElementById('calendarWeekdays'),
   calendarGrid: document.getElementById('calendarGrid'),
@@ -92,6 +209,7 @@ const els = {
   bulkActions: document.getElementById('bulkActions'),
   bulkCloseBtn: document.getElementById('bulkCloseBtn'),
   bulkOofBtn: document.getElementById('bulkOofBtn'),
+  bulkVacationBtn: document.getElementById('bulkVacationBtn'),
   bulkWorklogBtn: document.getElementById('bulkWorklogBtn'),
   bulkWorklogForm: document.getElementById('bulkWorklogForm'),
   bulkIssue: document.getElementById('bulkIssue'),
@@ -123,12 +241,33 @@ function pad(n) { return n.toString().padStart(2, '0'); }
 function fmtDate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 function todayStr() { return fmtDate(new Date()); }
 function isWeekend(d) { const wd = d.getDay(); return wd === 0 || wd === 6; }
+function vacationAllowanceForYear(year) {
+  const value = Number(state.annualVacationDaysByYear[String(year)]);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+function syncVacationEntitlementInputs(year = state.anchor.getFullYear()) {
+  els.annualVacationYearLabel.textContent = String(year);
+  els.annualVacationDaysInput.value = String(vacationAllowanceForYear(year));
+}
 function quickTimeButtonsHtml() {
   const label = (time) => time.replace(/^0/, '');
   return `<div class="time-quick-picks"><button type="button" class="time-quick-btn" data-time="${state.morningStart}">${label(state.morningStart)}</button><button type="button" class="time-quick-btn" data-time="${state.afternoonStart}">${label(state.afternoonStart)}</button></div>`;
 }
+function startTimeFieldHtml(inputHtml) {
+  // Do not nest the quick-pick buttons inside a <label>. A click on the
+  // label's empty area can otherwise activate a control unexpectedly.
+  return `<div class="time-field"><span class="time-field-label">Start time</span>${quickTimeButtonsHtml()}${inputHtml}</div>`;
+}
 function holidayForDate(dateStr) { return state.publicHolidays.get(dateStr) || null; }
+function isVacation(dateStr) { return state.vacationDates.has(dateStr); }
+function isAbsence(dateStr) { return state.oofDates.has(dateStr) || isVacation(dateStr); }
 function isExcludedHoliday(dateStr) { return ['exclude', 'block'].includes(state.holidayMode) && Boolean(holidayForDate(dateStr)); }
+function entriesInChronologicalOrder(entries) {
+  return entries.slice().sort((a, b) => {
+    const byStart = new Date(a.started || 0).getTime() - new Date(b.started || 0).getTime();
+    return byStart || String(a.worklogId || '').localeCompare(String(b.worklogId || ''));
+  });
+}
 function mondayIndex(d) { return (d.getDay() + 6) % 7; }
 
 function startOfWeek(d) {
@@ -143,6 +282,12 @@ function getRange() {
     const start = startOfWeek(state.anchor);
     const end = new Date(start);
     end.setDate(end.getDate() + 6);
+    return { gridStart: start, gridEnd: end, dataStart: start, dataEnd: end };
+  }
+  if (state.view === 'year') {
+    const year = state.anchor.getFullYear();
+    const start = new Date(year, 0, 1);
+    const end = new Date(year, 11, 31);
     return { gridStart: start, gridEnd: end, dataStart: start, dataEnd: end };
   }
   const year = state.anchor.getFullYear();
@@ -161,9 +306,32 @@ function setStatus(msg, isError) {
   els.statusBar.classList.toggle('error', !!isError);
 }
 
+function setApiError(error, prefix = '') {
+  if (error.code !== 'JIRA_AUTH_REQUIRED') {
+    setStatus(`${prefix}${error.message}`, true);
+    return;
+  }
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'status-action';
+  button.textContent = 'Update API credentials';
+  button.addEventListener('click', () => { void manageCredentials(); });
+  els.statusBar.replaceChildren(
+    document.createTextNode(`${prefix}${error.message} The Jira browser login is not used. `),
+    button,
+  );
+  els.statusBar.classList.remove('hidden');
+  els.statusBar.classList.add('error');
+}
+
 async function api(path, options) {
   const response = await chrome.runtime.sendMessage({ type: 'api', path, options: options || {} });
-  if (!response?.ok) throw new Error(response?.error || 'Extension service unavailable.');
+  if (!response?.ok) {
+    const error = new Error(response?.error || 'Extension service unavailable.');
+    error.code = response?.code;
+    error.site = response?.site;
+    throw error;
+  }
   return response.data;
 }
 
@@ -259,7 +427,7 @@ function openSetupDialog({ required = false } = {}) {
   });
 }
 
-els.manageCredentialsBtn.addEventListener('click', async () => {
+async function manageCredentials() {
   const config = await api('/api/config/status');
   els.setupSite.value = config.site || '';
   els.setupEmail.value = config.email || '';
@@ -267,7 +435,9 @@ els.manageCredentialsBtn.addEventListener('click', async () => {
   els.setupError.classList.add('hidden');
   const changed = await openSetupDialog();
   if (changed) location.reload();
-});
+}
+
+els.manageCredentialsBtn.addEventListener('click', () => { void manageCredentials(); });
 
 els.deleteCredentialsBtn.addEventListener('click', async () => {
   if (!confirm('Remove the saved Jira credentials from this Chrome profile?')) return;
@@ -323,15 +493,10 @@ document.addEventListener('click', (e) => {
   const suggestionsEl = document.getElementById('issueSuggestions');
   const issueInput = document.getElementById('issuePickerInput');
   if (!suggestionsEl || !issueInput) return;
-  // Keep the dropdown open as long as the search field still has focus,
-  // rather than only comparing against e.target: a click that focuses the
-  // field can, in some input pipelines, dispatch a second click event whose
-  // target is an unrelated ancestor, which momentarily made this listener
-  // close the dropdown it had just opened. Focus state is the more stable
-  // signal here — it only actually changes when the user really does click
-  // (or tab) away.
-  if (document.activeElement === issueInput) return;
-  if (!suggestionsEl.contains(e.target)) {
+  const picker = issueInput.closest('.issue-picker');
+  // The input can retain focus after a click alongside it. Use the picker
+  // boundaries rather than focus state so that click also closes suggestions.
+  if (!picker?.contains(e.target)) {
     suggestionsEl.classList.add('hidden');
   }
 });
@@ -370,23 +535,106 @@ function updatePeriodLabel() {
   if (state.view === 'week') {
     const { dataStart, dataEnd } = getRange();
     els.periodLabel.textContent = `${dataStart.getDate()} ${MONTH_LABELS[dataStart.getMonth()].slice(0, 3)} – ${dataEnd.getDate()} ${MONTH_LABELS[dataEnd.getMonth()].slice(0, 3)} ${dataEnd.getFullYear()}`;
+  } else if (state.view === 'year') {
+    els.periodLabel.textContent = String(state.anchor.getFullYear());
   } else {
     els.periodLabel.textContent = `${MONTH_LABELS[state.anchor.getMonth()]} ${state.anchor.getFullYear()}`;
   }
+  syncVacationEntitlementInputs(state.anchor.getFullYear());
 }
 
-function weekendsHiddenNow() {
-  return state.view === 'month' && !state.showWeekends;
-}
+function weekendsHiddenNow() { return !state.showWeekends; }
 
 function renderWeekdayHeader() {
+  if (state.view === 'year') {
+    els.calendarWeekdays.classList.add('hidden');
+    return;
+  }
+  els.calendarWeekdays.classList.remove('hidden');
   const labels = weekendsHiddenNow() ? WEEKDAY_LABELS.slice(0, 5) : WEEKDAY_LABELS;
   els.calendarWeekdays.style.gridTemplateColumns = `repeat(${labels.length}, 1fr)`;
   els.calendarWeekdays.innerHTML = labels.map((d) => `<div>${d}</div>`).join('');
 }
 
+async function selectCalendarDay(dateStr, event) {
+  if (event.ctrlKey || event.metaKey) {
+    if (state.selectedDates.has(dateStr)) state.selectedDates.delete(dateStr);
+    else state.selectedDates.add(dateStr);
+    if (!state.selectedDates.size) state.selectedDates.add(dateStr);
+  } else {
+    state.selectedDates = new Set([dateStr]);
+  }
+  state.selectedDate = state.selectedDates.has(dateStr)
+    ? dateStr
+    : Array.from(state.selectedDates).sort().at(-1);
+  els.calendarGrid.querySelectorAll('[data-date]').forEach((dayCell) => {
+    dayCell.classList.toggle('selected', state.selectedDates.has(dayCell.dataset.date));
+  });
+  renderBulkPanel();
+  try {
+    const selectedWeekByDate = await resolveSelectedWeekData();
+    if (state.selectedDate !== dateStr) return;
+    state.selectedWeekByDate = selectedWeekByDate;
+    renderSummary();
+  } catch (_) {
+    // fetchWorklogRange already displays the Jira error. Keep the previously
+    // loaded summary instead of replacing it with an empty week.
+  }
+}
+
+function wireCalendarDayInteractions(selector) {
+  els.calendarGrid.querySelectorAll(selector).forEach((cell) => {
+    cell.addEventListener('click', (event) => selectCalendarDay(cell.dataset.date, event));
+    cell.addEventListener('dblclick', () => openDayDialog(cell.dataset.date));
+  });
+}
+
+function monthChipLimit() {
+  if (window.innerHeight < 850) return 1;
+  if (window.innerHeight < 1050) return 2;
+  return 3;
+}
+
+function renderYearGrid() {
+  const year = state.anchor.getFullYear();
+  const hideWeekends = weekendsHiddenNow();
+  const weekdayLabels = hideWeekends ? WEEKDAY_LABELS.slice(0, 5) : WEEKDAY_LABELS;
+  const months = MONTH_LABELS.map((label, month) => {
+    const first = new Date(year, month, 1);
+    const last = new Date(year, month + 1, 0);
+    const leading = hideWeekends ? Math.min(5, mondayIndex(first)) : mondayIndex(first);
+    const slots = [];
+    for (let i = 0; i < leading; i += 1) slots.push('<span class="year-day empty"></span>');
+    for (let day = 1; day <= last.getDate(); day += 1) {
+      const date = new Date(year, month, day);
+      if (hideWeekends && isWeekend(date)) continue;
+      const dateStr = fmtDate(date);
+      const entries = state.byDate[dateStr] || [];
+      const hours = secondsToHours(entries.reduce((sum, entry) => sum + Number(entry.seconds || 0), 0));
+      const isOof = state.oofDates.has(dateStr);
+      const vacation = isVacation(dateStr);
+      const holiday = holidayForDate(dateStr);
+      const holidayName = holiday?.localName || holiday?.name || '';
+      const classes = ['year-day', dateStr === todayStr() ? 'today' : '', state.selectedDates.has(dateStr) ? 'selected' : '', isOof ? 'oof' : '', vacation ? 'vacation' : '', holiday ? 'holiday' : '', entries.length ? badgeClass(hours, state.expectedHours, false) : 'none'].filter(Boolean).join(' ');
+      const detail = isOof ? 'OOF' : vacation ? 'VAC' : holidayName || (entries.length ? fmtHours(hours) : '');
+      slots.push(`<button type="button" class="${classes}" data-date="${dateStr}" title="${escapeHtml(holidayName || dateStr)}"><span>${day}</span><small>${escapeHtml(detail)}</small></button>`);
+    }
+    return `<section class="year-month"><h3>${label}</h3><div class="year-weekdays" style="grid-template-columns:repeat(${weekdayLabels.length},1fr)">${weekdayLabels.map((d) => `<span>${d.slice(0, 1)}</span>`).join('')}</div><div class="year-days" style="grid-template-columns:repeat(${weekdayLabels.length},1fr)">${slots.join('')}</div></section>`;
+  });
+  els.calendarGrid.classList.remove('week-view');
+  els.calendarGrid.classList.add('year-view');
+  els.calendarGrid.removeAttribute('style');
+  els.calendarGrid.innerHTML = months.join('');
+  wireCalendarDayInteractions('.year-day[data-date]');
+}
+
 function renderGrid() {
+  if (state.view === 'year') {
+    renderYearGrid();
+    return;
+  }
   const { gridStart, gridEnd, dataStart, dataEnd } = getRange();
+  els.calendarGrid.classList.remove('year-view');
   els.calendarGrid.classList.toggle('week-view', state.view === 'week');
   const hideWeekends = weekendsHiddenNow();
   els.calendarGrid.style.gridTemplateColumns = `repeat(${hideWeekends ? 5 : 7}, 1fr)`;
@@ -402,7 +650,7 @@ function renderGrid() {
     const dateStr = fmtDate(cursor);
     const inRange = cursor >= dataStart && cursor <= dataEnd;
     const isFuture = dateStr > today;
-    const entries = state.byDate[dateStr] || [];
+    const entries = entriesInChronologicalOrder(state.byDate[dateStr] || []);
     const totalSeconds = entries.reduce((sum, e) => sum + e.seconds, 0);
     const hours = secondsToHours(totalSeconds);
 
@@ -410,7 +658,9 @@ function renderGrid() {
       cells.push(`<div class="day-cell empty-slot"></div>`);
     } else {
       const isOof = state.oofDates.has(dateStr);
+      const vacation = isVacation(dateStr);
       const holiday = holidayForDate(dateStr);
+      const holidayName = holiday?.localName || holiday?.name || 'Holiday';
       const excludedHoliday = isExcludedHoliday(dateStr);
       const cls = [
         'day-cell',
@@ -419,23 +669,28 @@ function renderGrid() {
         dateStr === today ? 'today' : '',
         state.selectedDates.has(dateStr) ? 'selected' : '',
         isOof ? 'oof' : '',
+        vacation ? 'vacation' : '',
         holiday ? 'holiday' : '',
         excludedHoliday ? 'holiday-blocked' : '',
       ].filter(Boolean).join(' ');
 
       const badge = isOof
         ? `<span class="hours-badge oof-badge">OOF</span>`
+        : vacation
+          ? `<span class="hours-badge vacation-badge">Vacation</span>`
         : holiday
-          ? `<span class="hours-badge holiday-badge" title="${escapeHtml(holiday.localName || holiday.name)}">Holiday</span>`
+          ? `<span class="hours-badge holiday-badge" title="${escapeHtml(holidayName)}">${escapeHtml(holidayName)}</span>`
         : entries.length || !weekend
           ? `<span class="hours-badge ${badgeClass(hours, state.expectedHours, weekend)}">${fmtHours(hours)}</span>`
           : `<span class="hours-badge none">—</span>`;
 
-      const maxChips = state.view === 'week' ? entries.length : 3;
+      const maxChips = state.view === 'week' ? entries.length : monthChipLimit();
       const visibleEntries = entries.slice(0, maxChips);
       const hiddenCount = entries.length - visibleEntries.length;
       const chipHtml = visibleEntries
-        .map((e) => `<span class="chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}">${escapeHtml(e.issueKey)} · ${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' 🤖' : ''}</span>`)
+        .map((e) => state.view === 'week'
+          ? `<span class="chip week-chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}"><span class="chip-time">${extractTime(e.started)}</span><span class="chip-key">${escapeHtml(e.issueKey)}</span><span class="chip-summary">${escapeHtml(e.issueSummary)}</span><span class="chip-hours">${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' <span class="auto-indicator" aria-label="Auto-logged">🤖</span>' : ''}</span></span>`
+          : `<span class="chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}">${escapeHtml(e.issueKey)} · ${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' <span class="auto-indicator" aria-label="Auto-logged">🤖</span>' : ''}</span>`)
         .join('');
       const moreChip = hiddenCount > 0 ? `<span class="chip chip-more">+${hiddenCount} more</span>` : '';
       const extra = `<div class="issue-list">${chipHtml || moreChip ? chipHtml + moreChip : (state.view === 'week' ? '<span class="chip" style="opacity:.5">No entries</span>' : '')}</div>`;
@@ -449,35 +704,24 @@ function renderGrid() {
     cursor.setDate(cursor.getDate() + 1);
   }
   els.calendarGrid.innerHTML = cells.join('');
-  els.calendarGrid.querySelectorAll('.day-cell[data-date]').forEach((cell) => {
-    cell.addEventListener('click', async (event) => {
-      const dateStr = cell.dataset.date;
-      if (event.ctrlKey || event.metaKey) {
-        if (state.selectedDates.has(dateStr)) state.selectedDates.delete(dateStr);
-        else state.selectedDates.add(dateStr);
-        if (!state.selectedDates.size) state.selectedDates.add(dateStr);
-      } else {
-        state.selectedDates = new Set([dateStr]);
-      }
-      state.selectedDate = state.selectedDates.has(dateStr)
-        ? dateStr
-        : Array.from(state.selectedDates).sort().at(-1);
-      els.calendarGrid.querySelectorAll('.day-cell.selected').forEach((selected) => selected.classList.remove('selected'));
-      els.calendarGrid.querySelectorAll('.day-cell[data-date]').forEach((dayCell) => {
-        dayCell.classList.toggle('selected', state.selectedDates.has(dayCell.dataset.date));
-      });
-      renderBulkPanel();
-      const selectedWeekByDate = await resolveSelectedWeekData();
-      // Ignore a slower result if another day was selected meanwhile.
-      if (state.selectedDate !== dateStr) return;
-      state.selectedWeekByDate = selectedWeekByDate;
-      renderSummary();
-    });
-    cell.addEventListener('dblclick', () => openDayDialog(cell.dataset.date));
-  });
+  wireCalendarDayInteractions('.day-cell[data-date]');
 }
 
+let resizeRenderFrame;
+window.addEventListener('resize', () => {
+  if (state.view !== 'month') return;
+  cancelAnimationFrame(resizeRenderFrame);
+  resizeRenderFrame = requestAnimationFrame(renderGrid);
+});
+
 function renderLoadingGrid() {
+  if (state.view === 'year') {
+    els.calendarGrid.classList.remove('week-view');
+    els.calendarGrid.classList.add('year-view', 'is-loading');
+    els.calendarGrid.removeAttribute('style');
+    els.calendarGrid.innerHTML = MONTH_LABELS.map((label) => `<section class="year-month loading-year-month"><h3>${label}</h3><div class="year-loading"></div></section>`).join('');
+    return;
+  }
   const columns = weekendsHiddenNow() ? 5 : 7;
   const cellCount = state.view === 'week' ? columns : columns * 5;
   els.calendarGrid.classList.toggle('week-view', state.view === 'week');
@@ -511,7 +755,10 @@ function forEachDateMap(fn) {
   new Set([state.byDate, state.monthByDate, state.selectedWeekByDate]).forEach(fn);
 }
 
+const pendingOptimisticEntries = new Map();
+
 function injectOptimisticEntry(dateStr, entry) {
+  pendingOptimisticEntries.set(String(entry.worklogId), { dateStr, entry });
   forEachDateMap((map) => {
     map[dateStr] = [...(map[dateStr] || []), entry];
   });
@@ -525,10 +772,33 @@ function patchOptimisticEntry(dateStr, worklogId, patch) {
 }
 
 function removeOptimisticEntry(dateStr, worklogId) {
+  pendingOptimisticEntries.delete(String(worklogId));
   forEachDateMap((map) => {
     if (!map[dateStr]) return;
-    map[dateStr] = map[dateStr].filter((e) => e.worklogId !== worklogId);
+    map[dateStr] = map[dateStr].filter((e) => String(e.worklogId) !== String(worklogId));
   });
+}
+
+function mergePendingOptimisticEntries(byDate, rangeStart, rangeEnd) {
+  for (const [worklogId, pending] of pendingOptimisticEntries) {
+    if (pending.dateStr < rangeStart || pending.dateStr > rangeEnd) continue;
+    const entries = byDate[pending.dateStr] || [];
+    if (entries.some((entry) => String(entry.worklogId) === worklogId)) {
+      pendingOptimisticEntries.delete(worklogId);
+    } else {
+      byDate[pending.dateStr] = [...entries, pending.entry];
+    }
+  }
+  return byDate;
+}
+
+let reconcileTimer;
+function reconcileWithJiraAfterWrite() {
+  // Jira's worklog search index is eventually consistent. Keeping the
+  // optimistic entry visible until a delayed refresh prevents a just-saved
+  // worklog from disappearing from the calendar.
+  clearTimeout(reconcileTimer);
+  reconcileTimer = setTimeout(() => refresh(), 3000);
 }
 
 async function openDayDialog(dateStr) {
@@ -540,8 +810,12 @@ async function openDayDialog(dateStr) {
   if (state.selectedDate !== dateStr) {
     state.selectedDate = dateStr;
     renderGrid();
-    state.selectedWeekByDate = await resolveSelectedWeekData();
-    renderSummary();
+    try {
+      state.selectedWeekByDate = await resolveSelectedWeekData();
+      renderSummary();
+    } catch (_) {
+      // Preserve the last successful summary while the Jira error is visible.
+    }
   }
 }
 
@@ -555,13 +829,15 @@ function renderBulkPanel() {
   els.bulkPanel.classList.toggle('hidden', !visible);
   if (!visible) return;
   els.bulkCount.textContent = `${dates.length} days selected · Ctrl/Cmd-click to change`;
+  els.bulkOofBtn.textContent = dates.some((dateStr) => state.oofDates.has(dateStr)) ? 'Clear OOF' : 'Mark OOF';
+  els.bulkVacationBtn.textContent = dates.some((dateStr) => isVacation(dateStr)) ? 'Clear vacation' : 'Mark vacation';
   els.bulkSummary.replaceChildren(...dates.map((dateStr) => {
     const entries = state.byDate[dateStr] || [];
     const hours = fmtHours(secondsToHours(entries.reduce((sum, entry) => sum + entry.seconds, 0)));
     const tasks = [...new Set(entries.map((entry) => entry.issueKey))].join(', ') || 'No worklogs';
     const row = document.createElement('div');
     row.className = 'bulk-summary-row';
-    row.textContent = `${dateStr} · ${hours} · ${tasks}${state.oofDates.has(dateStr) ? ' · OOF' : ''}`;
+    row.textContent = `${dateStr} · ${hours} · ${tasks}${state.oofDates.has(dateStr) ? ' · OOF' : isVacation(dateStr) ? ' · Vacation' : ''}`;
     return row;
   }));
   els.bulkError.classList.add('hidden');
@@ -580,16 +856,18 @@ els.bulkCloseBtn.addEventListener('click', clearBulkSelection);
 
 els.bulkOofBtn.addEventListener('click', async () => {
   const dates = selectedDatesSorted();
+  const clearingOof = dates.some((dateStr) => state.oofDates.has(dateStr));
   const withWorklogs = dates.filter((dateStr) => (state.byDate[dateStr] || []).length > 0);
-  if (withWorklogs.length) {
+  if (!clearingOof && withWorklogs.length) {
     els.bulkError.textContent = `OOF cannot be applied because these days already have worklogs: ${withWorklogs.join(', ')}`;
     els.bulkError.classList.remove('hidden');
     return;
   }
   els.bulkOofBtn.disabled = true;
   try {
-    for (const dateStr of dates) await setOofDate(state.me.accountId, dateStr, true);
+    for (const dateStr of dates) await setOofDate(state.me.accountId, dateStr, !clearingOof);
     state.oofDates = await loadOofDates(state.me.accountId);
+    state.vacationDates = await loadVacationDates(state.me.accountId);
     renderGrid();
     renderSummary();
     renderBulkPanel();
@@ -598,12 +876,34 @@ els.bulkOofBtn.addEventListener('click', async () => {
   }
 });
 
+els.bulkVacationBtn.addEventListener('click', async () => {
+  const dates = selectedDatesSorted();
+  const clearingVacation = dates.some((dateStr) => isVacation(dateStr));
+  const withWorklogs = dates.filter((dateStr) => (state.byDate[dateStr] || []).length > 0);
+  if (!clearingVacation && withWorklogs.length) {
+    els.bulkError.textContent = `Vacation cannot be applied because these days already have worklogs: ${withWorklogs.join(', ')}`;
+    els.bulkError.classList.remove('hidden');
+    return;
+  }
+  els.bulkVacationBtn.disabled = true;
+  try {
+    for (const dateStr of dates) await setVacationDate(state.me.accountId, dateStr, !clearingVacation);
+    state.vacationDates = await loadVacationDates(state.me.accountId);
+    state.oofDates = await loadOofDates(state.me.accountId);
+    renderGrid();
+    renderSummary();
+    renderBulkPanel();
+  } finally {
+    els.bulkVacationBtn.disabled = false;
+  }
+});
+
 els.bulkWorklogBtn.addEventListener('click', async () => {
   const dates = selectedDatesSorted();
   els.bulkError.classList.add('hidden');
   els.bulkWorklogBtn.disabled = true;
   try {
-    if (dates.some((dateStr) => state.oofDates.has(dateStr))) throw new Error('Remove OOF from the selected days before adding worklogs.');
+    if (dates.some((dateStr) => isAbsence(dateStr))) throw new Error('Remove OOF or Vacation from the selected days before adding worklogs.');
     const issueLists = await Promise.all(dates.map((dateStr) => api(`/api/issues/open?accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`)));
     const keySignatures = issueLists.map((issues) => issues.map((issue) => issue.key).sort().join('|'));
     if (!issueLists[0].length || !keySignatures.every((signature) => signature === keySignatures[0])) {
@@ -664,24 +964,28 @@ els.bulkSaveBtn.addEventListener('click', async () => {
 });
 
 function renderDayDialogBody(dateStr) {
-  const entries = state.byDate[dateStr] || [];
+  const entries = entriesInChronologicalOrder(state.byDate[dateStr] || []);
   const own = isOwnUser();
   const isOof = state.oofDates.has(dateStr);
+  const vacation = isVacation(dateStr);
   const holiday = holidayForDate(dateStr);
   const excludedHoliday = isExcludedHoliday(dateStr);
 
   let html = '';
   // Never shown once the day has any logged task, or while the add-worklog
   // form is expanded (that form gets hidden again in wireAddEntryForm).
-  const canMarkOof = own && entries.length === 0;
+  const canManageAbsence = own && entries.length === 0;
 
-  if (canMarkOof) {
+  if (canManageAbsence) {
+    const selectedCategory = isOof ? 'oof' : vacation ? 'vacation' : 'none';
     html += `
       <div id="oofToggleWrapper">
-        <label class="oof-toggle">
-          <input type="checkbox" id="oofCheckbox" ${isOof ? 'checked' : ''} />
-          Mark as Out of Office
-        </label>
+        <div class="absence-label">Day category</div>
+        <div class="absence-selector" role="group" aria-label="Day category">
+          <button type="button" data-absence="none" class="${selectedCategory === 'none' ? 'active' : ''}"><span class="absence-dot none"></span>Working day</button>
+          <button type="button" data-absence="oof" class="${selectedCategory === 'oof' ? 'active' : ''}"><span class="absence-dot oof"></span>OOF</button>
+          <button type="button" data-absence="vacation" class="${selectedCategory === 'vacation' ? 'active' : ''}"><span class="absence-dot vacation"></span>Vacation</button>
+        </div>
       </div>`;
   }
 
@@ -697,8 +1001,8 @@ function renderDayDialogBody(dateStr) {
     html += `<div id="entryList">${entries.map((e, i) => entryRowHtml(e, overlapFlags[i])).join('')}</div>`;
   }
 
-  if (own && isOof) {
-    html += `<div class="readonly-note">This day is marked as Out of Office — unmark it above to add a worklog.</div>`;
+  if (own && isAbsence(dateStr)) {
+    html += `<div class="readonly-note">This day is marked as ${isOof ? 'Out of Office' : 'Vacation'} — unmark it above to add a worklog.</div>`;
   } else if (own) {
     html += `
       <div class="add-entry-section">
@@ -712,16 +1016,17 @@ function renderDayDialogBody(dateStr) {
   els.dayDialogBody.innerHTML = html;
 
   if (entries.length) wireEntryRows(dateStr);
-  if (own && !isOof) wireAddEntryForm(dateStr);
-  if (canMarkOof) {
-    document.getElementById('oofCheckbox').addEventListener('change', async (e) => {
-      state.oofDates = await setOofDate(state.user.accountId, dateStr, e.target.checked);
+  if (own && !isAbsence(dateStr)) wireAddEntryForm(dateStr);
+  if (canManageAbsence) {
+    document.querySelectorAll('#oofToggleWrapper [data-absence]').forEach((button) => button.addEventListener('click', async () => {
+      const category = button.dataset.absence;
+      state.oofDates = await setOofDate(state.user.accountId, dateStr, category === 'oof');
+      state.vacationDates = await setVacationDate(state.user.accountId, dateStr, category === 'vacation');
+      state.oofDates = await loadOofDates(state.user.accountId);
       renderGrid();
       renderSummary();
-      // Toggling OOF flips whether adding a worklog is allowed on this day,
-      // so the dialog body needs a full re-render, not just the checkbox.
       renderDayDialogBody(dateStr);
-    });
+    }));
   }
 }
 
@@ -757,10 +1062,9 @@ function entryRowHtml(e, overlaps) {
   const endTime = addHoursToTime(startTime, secondsToHours(e.seconds));
   return `<div class="entry-row${overlaps ? ' overlaps' : ''}" data-worklog-id="${escapeHtml(String(e.worklogId || ''))}" data-issue-key="${escapeHtml(e.issueKey)}" data-seconds="${Number(e.seconds) || 0}" data-started="${escapeHtml(e.started || '')}" data-comment="${escapeHtml(e.comment || '')}">
     <div class="entry-main">
-      ${issueLinkOpen}<span class="issue-key">${escapeHtml(e.issueKey)}</span>
+      ${issueLinkOpen}<span class="issue-key">${escapeHtml(e.issueKey)}${e.autoLogged ? ' <span class="auto-indicator" title="Created automatically by the auto-logwork scheduler" aria-label="Auto-logged">🤖</span>' : ''}</span>
       <span class="summary">${escapeHtml(e.issueSummary)}</span>${issueLinkClose}
       <span class="entry-time-range"${overlaps ? ' title="Overlaps with another worklog this day"' : ''}>${startTime}–${endTime}</span>
-      ${e.autoLogged ? `<span class="auto-tag" title="Created automatically by the auto-logwork scheduler">auto</span>` : ''}
       ${e.comment ? `<span class="comment">${escapeHtml(e.comment)}</span>` : ''}
       ${taskDetails.length ? `<span class="task-details">${taskDetails.join(' · ')}</span>` : ''}
     </div>
@@ -782,9 +1086,39 @@ function wireEntryRows(dateStr) {
 }
 
 function extractTime(startedIso) {
-  // startedIso looks like 2026-09-01T09:00:00.000+0300
+  // Jira timestamps include an offset. Convert them to the same local browser
+  // time zone used when a worklog is created, rather than displaying the raw
+  // server-side offset.
+  const instant = new Date(startedIso || '');
+  if (!Number.isNaN(instant.getTime())) {
+    return `${String(instant.getHours()).padStart(2, '0')}:${String(instant.getMinutes()).padStart(2, '0')}`;
+  }
   const match = /T(\d{2}:\d{2})/.exec(startedIso || '');
   return match ? match[1] : '09:00';
+}
+
+function minutesToTime(minutes) {
+  const safe = Math.max(0, Math.min(1439, Math.round(minutes)));
+  return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+}
+
+function suggestedStartTime(dateStr) {
+  const latestEnd = (state.byDate[dateStr] || []).reduce((latest, entry) => {
+    const start = timeToMinutes(extractTime(entry.started));
+    const end = start + Math.round(Number(entry.seconds || 0) / 60);
+    return Math.max(latest, end);
+  }, timeToMinutes(state.morningStart));
+  return minutesToTime(latestEnd);
+}
+
+function suggestedHours(dateStr) {
+  const loggedHours = secondsToHours((state.byDate[dateStr] || []).reduce(
+    (sum, entry) => sum + Number(entry.seconds || 0),
+    0
+  ));
+  // This is only a convenient default: the user can still enter any valid
+  // duration when the remaining expected time has already been reached.
+  return Math.max(0.5, roundToHalfHour(state.expectedHours - loggedHours));
 }
 
 function addHoursToTime(hhmm, hours) {
@@ -808,6 +1142,10 @@ function startEditEntry(row, dateStr) {
   const hours = roundToHalfHour(seconds / 3600);
   const time = extractTime(row.dataset.started);
   const comment = row.dataset.comment || '';
+  const otherDaySeconds = Math.max(0, (state.byDate[dateStr] || []).reduce(
+    (sum, entry) => sum + Number(entry.seconds || 0),
+    0
+  ) - seconds);
 
   // A plain <div>, not <form>: this row lives inside the day dialog's own
   // <form method="dialog">, and browsers silently drop any <form> nested
@@ -820,13 +1158,13 @@ function startEditEntry(row, dateStr) {
   row.innerHTML = `
     <div class="edit-row-form add-entry-form">
       <div class="edit-row-issue">${escapeHtml(issueKey)}</div>
-      <label>Hours
-        <input type="number" min="0.5" step="0.5" value="${hours}" required />
-      </label>
-      <label>Start time
-        ${quickTimeButtonsHtml()}
-        <input type="time" value="${time}" required />
-      </label>
+      <div class="hours-with-total">
+        <label>Hours
+          <input type="number" min="0.5" step="0.5" value="${hours}" required />
+        </label>
+        <div class="day-total-preview" aria-live="polite"></div>
+      </div>
+      ${startTimeFieldHtml(`<input type="time" value="${time}" required />`)}
       <label>Comment (optional)
         <textarea placeholder="What did you work on...">${escapeHtml(comment)}</textarea>
       </label>
@@ -840,6 +1178,15 @@ function startEditEntry(row, dateStr) {
   const form = row.querySelector('.edit-row-form');
   const errorEl = row.querySelector('.form-error');
   const timeInputEl = form.querySelector('input[type="time"]');
+  const hoursInputEl = form.querySelector('input[type="number"]');
+  const totalPreview = form.querySelector('.day-total-preview');
+  const updateDayTotalPreview = () => {
+    const proposedHours = roundToHalfHour(Number(hoursInputEl.value));
+    totalPreview.textContent = `Total: ${fmtHours(secondsToHours(otherDaySeconds) + (proposedHours > 0 ? proposedHours : 0))}`;
+  };
+  hoursInputEl.addEventListener('input', updateDayTotalPreview);
+  hoursInputEl.addEventListener('change', updateDayTotalPreview);
+  updateDayTotalPreview();
   form.querySelectorAll('.time-quick-btn').forEach((btn) => {
     btn.addEventListener('click', () => { timeInputEl.value = btn.dataset.time; });
   });
@@ -868,7 +1215,7 @@ function startEditEntry(row, dateStr) {
       els.dayDialog.close();
       renderGrid();
       renderSummary();
-      refresh(); // background reconcile
+      reconcileWithJiraAfterWrite();
     } catch (err) {
       errorEl.textContent = err.message;
       errorEl.classList.remove('hidden');
@@ -880,29 +1227,44 @@ async function deleteEntry(row, dateStr) {
   const issueKey = row.dataset.issueKey;
   const worklogId = row.dataset.worklogId;
   if (!confirm(`Delete the worklog entry for ${issueKey}?`)) return;
+  const actionButtons = Array.from(row.querySelectorAll('.entry-actions button'));
+  const deleteBtn = row.querySelector('.delete-entry-btn');
+  row.classList.add('is-processing');
+  row.setAttribute('aria-busy', 'true');
+  actionButtons.forEach((button) => { button.disabled = true; });
+  if (deleteBtn) {
+    deleteBtn.classList.add('is-loading');
+    deleteBtn.textContent = 'Deleting…';
+  }
   try {
     await api(`/api/worklogs/${encodeURIComponent(issueKey)}/${encodeURIComponent(worklogId)}?accountId=${encodeURIComponent(state.me.accountId)}`, {
       method: 'DELETE',
     });
     removeOptimisticEntry(dateStr, worklogId);
-    els.dayDialog.close();
     renderGrid();
     renderSummary();
-    refresh(); // background reconcile
+    renderDayDialogBody(dateStr);
+    reconcileWithJiraAfterWrite();
   } catch (err) {
+    row.classList.remove('is-processing');
+    row.removeAttribute('aria-busy');
+    actionButtons.forEach((button) => { button.disabled = false; });
+    if (deleteBtn) {
+      deleteBtn.classList.remove('is-loading');
+      deleteBtn.textContent = 'Delete';
+    }
     alert(`Could not delete: ${err.message}`);
   }
 }
 
-async function loadOpenIssuesForDate(dateStr) {
-  if (state.openIssuesCache.has(dateStr)) return state.openIssuesCache.get(dateStr);
-  let issues = [];
-  try {
-    issues = await api(`/api/issues/open?accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`);
-  } catch (err) {
-    console.error(err);
-  }
-  state.openIssuesCache.set(dateStr, issues);
+async function loadOpenIssuesForDate(dateStr, force = false) {
+  const cached = state.openIssuesCache.get(dateStr);
+  if (!force && cached && Date.now() - cached.fetchedAt < OPEN_ISSUES_CACHE_TTL_MS) return cached.issues;
+  const issues = await api(`/api/issues/open?accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`);
+  // Never cache request failures as an empty result. A short-lived successful
+  // cache keeps repeated dialog openings fast while still reflecting Jira
+  // status and assignment changes without requiring a page refresh.
+  state.openIssuesCache.set(dateStr, { issues, fetchedAt: Date.now() });
   return issues;
 }
 
@@ -923,13 +1285,13 @@ function wireAddEntryForm(dateStr) {
       </label>
       <div id="selectedIssueLabel" style="font-size:12px;color:var(--muted);"></div>
       <div id="issueDetailInfo" class="issue-detail-info hidden"></div>
-      <label>Hours
-        <input type="number" id="addHoursInput" min="0.5" step="0.5" value="${state.expectedHours}" required />
-      </label>
-      <label>Start time
-        ${quickTimeButtonsHtml()}
-        <input type="time" id="addTimeInput" value="${state.morningStart}" required />
-      </label>
+      <div class="hours-with-total">
+        <label>Hours
+          <input type="number" id="addHoursInput" min="0.5" step="0.5" value="${suggestedHours(dateStr)}" required />
+        </label>
+        <div id="addDayTotal" class="day-total-preview" aria-live="polite"></div>
+      </div>
+      ${startTimeFieldHtml(`<input type="time" id="addTimeInput" value="${suggestedStartTime(dateStr)}" required />`)}
       <label>Comment (optional)
         <textarea id="addCommentInput" placeholder="What did you work on..."></textarea>
       </label>
@@ -946,6 +1308,21 @@ function wireAddEntryForm(dateStr) {
       });
     });
 
+    const hoursInput = document.getElementById('addHoursInput');
+    const totalPreview = document.getElementById('addDayTotal');
+    const existingSeconds = (state.byDate[dateStr] || []).reduce((sum, entry) => sum + Number(entry.seconds || 0), 0);
+    const updateDayTotalPreview = () => {
+      const proposedHours = roundToHalfHour(Number(hoursInput.value));
+      if (!proposedHours || proposedHours < 0) {
+        totalPreview.textContent = `Total: ${fmtHours(secondsToHours(existingSeconds))}`;
+        return;
+      }
+      totalPreview.textContent = `Total: ${fmtHours(secondsToHours(existingSeconds) + proposedHours)}`;
+    };
+    hoursInput.addEventListener('input', updateDayTotalPreview);
+    hoursInput.addEventListener('change', updateDayTotalPreview);
+    updateDayTotalPreview();
+
     let selectedIssue = null;
     const issueInput = document.getElementById('issuePickerInput');
     const suggestionsEl = document.getElementById('issueSuggestions');
@@ -957,13 +1334,15 @@ function wireAddEntryForm(dateStr) {
 
     function renderIssueOptions(openIssues, searchResults) {
       const parts = [];
+      const openKeys = new Set(openIssues.map((issue) => issue.key));
+      const uniqueSearchResults = (searchResults || []).filter((issue) => !openKeys.has(issue.key));
       if (openIssues.length) {
         parts.push(`<div class="group-label">${openGroupLabel}</div>`);
         parts.push(openIssues.map(issueOptionHtml).join(''));
       }
-      if (searchResults && searchResults.length) {
+      if (uniqueSearchResults.length) {
         parts.push('<div class="group-label">Search results</div>');
-        parts.push(searchResults.map(issueOptionHtml).join(''));
+        parts.push(uniqueSearchResults.map(issueOptionHtml).join(''));
       }
       if (!parts.length) {
         suggestionsEl.classList.add('hidden');
@@ -1007,6 +1386,61 @@ function wireAddEntryForm(dateStr) {
 
     let openIssues = [];
     let openIssuesLoaded = false;
+    let openIssuesError = null;
+    let openIssuesRequest = null;
+    const shouldShowOpenIssues = () => document.activeElement === issueInput && issueInput.value.trim().length < 2;
+    const knownProjectKeys = () => {
+      const keys = new Set(openIssues.map((issue) => issue.projectKey).filter(Boolean));
+      for (const map of [state.byDate, state.monthByDate, state.selectedWeekByDate]) {
+        for (const entries of Object.values(map)) {
+          for (const entry of entries) {
+            const key = entry.projectKey || String(entry.issueKey || '').match(/^([A-Za-z][A-Za-z0-9_]*)-/)?.[1];
+            if (key) keys.add(key);
+          }
+        }
+      }
+      return [...keys];
+    };
+
+    function renderIssueLoading() {
+      suggestionsEl.innerHTML = '<div class="group-label">Loading…</div>';
+      suggestionsEl.classList.remove('hidden');
+    }
+
+    function renderIssueLoadError(error) {
+      const message = document.createElement('div');
+      message.className = 'issue-load-error';
+      message.textContent = error?.message || 'Could not load Jira tasks.';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'issue-load-retry';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => { void refreshOpenIssues(true); });
+      suggestionsEl.replaceChildren(message, retry);
+      suggestionsEl.classList.remove('hidden');
+    }
+
+    async function refreshOpenIssues(force = false) {
+      if (openIssuesRequest) return openIssuesRequest;
+      openIssuesError = null;
+      if (shouldShowOpenIssues()) renderIssueLoading();
+      openIssuesRequest = loadOpenIssuesForDate(dateStr, force);
+      try {
+        openIssues = await openIssuesRequest;
+        openIssuesLoaded = true;
+        if (shouldShowOpenIssues()) renderIssueOptions(openIssues, null);
+        else if (document.activeElement === issueInput && issueInput.value.trim().length >= 2) {
+          issueInput.dispatchEvent(new Event('input'));
+        }
+      } catch (error) {
+        openIssuesLoaded = false;
+        openIssuesError = error;
+        console.error(error);
+        if (shouldShowOpenIssues()) renderIssueLoadError(error);
+      } finally {
+        openIssuesRequest = null;
+      }
+    }
 
     // Wire listeners synchronously (no await before this point) so a fast
     // click-then-focus from the user is never missed while the fetch below
@@ -1014,8 +1448,9 @@ function wireAddEntryForm(dateStr) {
     // invisible until an unrelated click forced a re-render.
     issueInput.addEventListener('focus', () => {
       if (!openIssuesLoaded) {
-        suggestionsEl.innerHTML = '<div class="group-label">Loading…</div>';
-        suggestionsEl.classList.remove('hidden');
+        if (openIssuesError) renderIssueLoadError(openIssuesError);
+        else renderIssueLoading();
+        if (!openIssuesRequest) void refreshOpenIssues(Boolean(openIssuesError));
         return;
       }
       renderIssueOptions(openIssues, null);
@@ -1025,12 +1460,15 @@ function wireAddEntryForm(dateStr) {
       clearTimeout(searchDebounce2);
       const q = issueInput.value.trim();
       if (q.length < 2) {
-        renderIssueOptions(openIssues, null);
+        if (openIssuesError) renderIssueLoadError(openIssuesError);
+        else if (openIssuesRequest) renderIssueLoading();
+        else renderIssueOptions(openIssues, null);
         return;
       }
       searchDebounce2 = setTimeout(async () => {
         try {
-          const results = await api(`/api/issues/search?q=${encodeURIComponent(q)}&accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`);
+          const projectKeys = knownProjectKeys().join(',');
+          const results = await api(`/api/issues/search?q=${encodeURIComponent(q)}&accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}&projectKeys=${encodeURIComponent(projectKeys)}`);
           renderIssueOptions(openIssues, results);
         } catch (err) {
           console.error(err);
@@ -1038,11 +1476,7 @@ function wireAddEntryForm(dateStr) {
       }, 250);
     });
 
-    loadOpenIssuesForDate(dateStr).then((issues) => {
-      openIssues = issues;
-      openIssuesLoaded = true;
-      if (document.activeElement === issueInput) renderIssueOptions(openIssues, null);
-    });
+    void refreshOpenIssues();
 
     document.getElementById('cancelAddEntry').addEventListener('click', () => renderDayDialogBody(dateStr));
     document.getElementById('saveAddEntry').addEventListener('click', async () => {
@@ -1090,10 +1524,12 @@ function wireAddEntryForm(dateStr) {
           originalEstimateSeconds: null,
           remainingEstimateSeconds: null,
         });
-        els.dayDialog.close();
         renderGrid();
         renderSummary();
-        refresh(); // background reconcile once Jira's search index catches up
+        // Return to the day's normal entry table, but keep the dialog open
+        // so the user can immediately inspect or add another worklog.
+        renderDayDialogBody(dateStr);
+        reconcileWithJiraAfterWrite();
       } catch (err) {
         errorEl.textContent = err.message;
         errorEl.classList.remove('hidden');
@@ -1122,7 +1558,7 @@ function computeStats(dataMap, rangeStart, rangeEnd) {
       const seconds = entries.reduce((s, e) => s + e.seconds, 0);
       totalSeconds += seconds;
       if (!isWeekend(cursor)) {
-        if (state.oofDates.has(dateStr)) {
+        if (isAbsence(dateStr)) {
           oofCount += 1;
         } else if (isExcludedHoliday(dateStr)) {
           oofCount += 1;
@@ -1163,7 +1599,7 @@ function statsBlockHtml(title, stats) {
           </div>
           ${stats.oofCount > 0 ? `<div class="stat">
             <span class="value">${stats.oofCount}</span>
-            <span class="label">OOF / blocked holidays</span>
+            <span class="label">OOF / vacation / holidays</span>
           </div>` : ''}
         </div>
       </div>
@@ -1175,7 +1611,48 @@ function statsBlockHtml(title, stats) {
     </div>`;
 }
 
+function vacationSummaryHtml(year) {
+  const today = todayStr();
+  const vacationDates = [...state.vacationDates]
+    .filter((dateStr) => dateStr.startsWith(`${year}-`))
+    .filter((dateStr) => !isWeekend(new Date(`${dateStr}T12:00:00`)))
+    .sort();
+  const taken = vacationDates.filter((dateStr) => dateStr <= today);
+  const planned = vacationDates.filter((dateStr) => dateStr > today);
+  const committed = taken.length + planned.length;
+  const allowance = vacationAllowanceForYear(year);
+  const remaining = Math.max(0, allowance - committed);
+  const overbooked = Math.max(0, committed - allowance);
+  const nextDates = planned.slice(0, 5).map((dateStr) => {
+    const date = new Date(`${dateStr}T12:00:00`);
+    return `${date.getDate()} ${MONTH_LABELS[date.getMonth()].slice(0, 3)}`;
+  });
+  return `<div class="summary-block vacation-summary">
+    <div class="summary-block-main">
+      <div class="summary-block-title">Vacation allowance · ${year}</div>
+      <div class="summary-stats">
+        <div class="stat"><span class="value">${allowance}</span><span class="label">Total days</span></div>
+        <div class="stat"><span class="value">${taken.length}</span><span class="label">Days taken</span></div>
+        <div class="stat"><span class="value">${planned.length}</span><span class="label">Days planned</span></div>
+        <div class="stat ${overbooked ? 'bad' : 'good'}"><span class="value">${remaining}</span><span class="label">Days available</span></div>
+      </div>
+    </div>
+    <div class="missing-days">${overbooked ? `<span class="missing-label">Overbooked by ${overbooked} day${overbooked === 1 ? '' : 's'}.</span>` : nextDates.length ? `<span class="missing-label">Next planned:</span><div class="missing-days-chips">${nextDates.map((label) => `<span class="missing-day-chip">${label}</span>`).join('')}</div>` : '<span class="no-gaps">No future vacation days marked.</span>'}</div>
+  </div>`;
+}
+
 function renderSummary() {
+  const isYearView = state.view === 'year';
+  els.vacationSummaryToggle.classList.toggle('hidden', !isYearView);
+  if (isYearView) {
+    els.vacationSummaryToggle.textContent = state.showVacationSummary ? 'Worklog details' : 'Vacation details';
+    if (state.showVacationSummary) {
+      els.summaryContent.innerHTML = vacationSummaryHtml(state.anchor.getFullYear());
+      return;
+    }
+  } else {
+    state.showVacationSummary = false;
+  }
   const selectedWeekStart = startOfWeek(new Date(state.selectedDate + 'T00:00:00'));
   const selectedWeekEnd = new Date(selectedWeekStart);
   selectedWeekEnd.setDate(selectedWeekEnd.getDate() + 6);
@@ -1218,24 +1695,33 @@ async function resolveSelectedWeekData() {
 
 async function fetchWorklogRange(rangeStart, rangeEnd) {
   try {
+    const start = fmtDate(rangeStart);
+    const end = fmtDate(rangeEnd);
     const data = await api(
-      `/api/worklogs?accountId=${encodeURIComponent(state.user.accountId)}&start=${fmtDate(rangeStart)}&end=${fmtDate(rangeEnd)}`
+      `/api/worklogs?accountId=${encodeURIComponent(state.user.accountId)}&start=${start}&end=${end}`
     );
-    return data.byDate || {};
+    return mergePendingOptimisticEntries(data.byDate || {}, start, end);
   } catch (err) {
-    setStatus(`Error loading worklogs: ${err.message}`, true);
-    return {};
+    setApiError(err, 'Error loading worklogs: ');
+    // A failed request must not look like a successful empty period: callers
+    // retain their last successful data and can retry without losing the
+    // worklogs already visible in another view.
+    throw err;
   }
 }
 
 async function loadHolidaysForRange(rangeStart, rangeEnd) {
-  state.publicHolidays = new Map();
+  state.publicHolidays = new Map(
+    [...state.manualHolidays.entries()].filter(([dateStr]) => dateStr >= fmtDate(rangeStart) && dateStr <= fmtDate(rangeEnd))
+  );
   if (!state.holidayCountry) return;
   const years = new Set();
   for (let y = rangeStart.getFullYear(); y <= rangeEnd.getFullYear(); y += 1) years.add(y);
   try {
     const groups = await Promise.all([...years].map((year) => api(`/api/holidays?year=${year}`)));
-    for (const holiday of groups.flat()) state.publicHolidays.set(holiday.date, holiday);
+    for (const holiday of groups.flat()) {
+      if (!state.publicHolidays.has(holiday.date)) state.publicHolidays.set(holiday.date, holiday);
+    }
   } catch (error) {
     setStatus(`Could not load public holidays: ${error.message}`, true);
   }
@@ -1249,22 +1735,45 @@ async function refresh() {
   updatePeriodLabel();
   renderWeekdayHeader();
   state.oofDates = await loadOofDates(state.user.accountId);
+  state.vacationDates = await loadVacationDates(state.user.accountId);
   renderLoadingGrid();
 
   const { dataStart, dataEnd } = getRange();
   setStatus('Loading worklogs from Jira…');
-  const [byDate] = await Promise.all([fetchWorklogRange(dataStart, dataEnd), loadHolidaysForRange(dataStart, dataEnd)]);
+  let byDate;
+  try {
+    [byDate] = await Promise.all([fetchWorklogRange(dataStart, dataEnd), loadHolidaysForRange(dataStart, dataEnd)]);
+  } catch (_) {
+    if (token !== state.refreshToken) return;
+    els.calendarGrid.classList.remove('is-loading');
+    renderGrid();
+    renderSummary();
+    renderBulkPanel();
+    return;
+  }
   if (token !== state.refreshToken) return;
   state.byDate = byDate;
   setStatus('');
 
   const monthStart = new Date(state.anchor.getFullYear(), state.anchor.getMonth(), 1);
   const monthEnd = new Date(state.anchor.getFullYear(), state.anchor.getMonth() + 1, 0);
-  const monthByDate = state.view === 'month' ? state.byDate : await fetchWorklogRange(monthStart, monthEnd);
+  let monthByDate = state.byDate;
+  if (state.view !== 'month') {
+    try {
+      monthByDate = await fetchWorklogRange(monthStart, monthEnd);
+    } catch (_) {
+      monthByDate = state.monthByDate;
+    }
+  }
   if (token !== state.refreshToken) return;
   state.monthByDate = monthByDate;
 
-  const selectedWeekByDate = await resolveSelectedWeekData();
+  let selectedWeekByDate = state.selectedWeekByDate;
+  try {
+    selectedWeekByDate = await resolveSelectedWeekData();
+  } catch (_) {
+    // Keep the last successful selected-week data and the visible API error.
+  }
   if (token !== state.refreshToken) return;
   state.selectedWeekByDate = selectedWeekByDate;
 
@@ -1275,21 +1784,36 @@ async function refresh() {
 }
 
 function updateWeekendsToggleAvailability() {
-  els.showWeekendsInput.disabled = state.view !== 'month';
+  els.showWeekendsInput.disabled = false;
 }
 
 els.viewMonthBtn.addEventListener('click', () => {
   state.view = 'month';
   els.viewMonthBtn.classList.add('active');
   els.viewWeekBtn.classList.remove('active');
+  els.viewYearBtn.classList.remove('active');
   updateWeekendsToggleAvailability();
   refresh();
 });
 
 els.viewWeekBtn.addEventListener('click', () => {
+  // Week view follows the date the user was working with, rather than the
+  // first day of the currently displayed month.
+  state.anchor = new Date(`${state.selectedDate || todayStr()}T12:00:00`);
   state.view = 'week';
   els.viewWeekBtn.classList.add('active');
   els.viewMonthBtn.classList.remove('active');
+  els.viewYearBtn.classList.remove('active');
+  updateWeekendsToggleAvailability();
+  refresh();
+});
+
+els.viewYearBtn.addEventListener('click', () => {
+  state.anchor = new Date(`${state.selectedDate || todayStr()}T12:00:00`);
+  state.view = 'year';
+  els.viewYearBtn.classList.add('active');
+  els.viewMonthBtn.classList.remove('active');
+  els.viewWeekBtn.classList.remove('active');
   updateWeekendsToggleAvailability();
   refresh();
 });
@@ -1301,7 +1825,18 @@ els.showWeekendsInput.addEventListener('change', () => {
 });
 
 els.prevBtn.addEventListener('click', () => {
-  if (state.view === 'week') state.anchor.setDate(state.anchor.getDate() - 7);
+  if (state.view === 'week') {
+    const selected = new Date(`${state.selectedDate || fmtDate(state.anchor)}T12:00:00`);
+    state.anchor.setDate(state.anchor.getDate() - 7);
+    selected.setDate(selected.getDate() - 7);
+    state.selectedDate = fmtDate(selected);
+    state.selectedDates = new Set([state.selectedDate]);
+  }
+  else if (state.view === 'year') {
+    state.anchor.setFullYear(state.anchor.getFullYear() - 1);
+    state.selectedDate = fmtDate(state.anchor);
+    state.selectedDates = new Set([state.selectedDate]);
+  }
   else {
     const selectedDay = state.selectedDate ? Number(state.selectedDate.slice(8, 10)) : state.anchor.getDate();
     const target = new Date(state.anchor.getFullYear(), state.anchor.getMonth() - 1, 1);
@@ -1316,7 +1851,18 @@ els.prevBtn.addEventListener('click', () => {
 });
 
 els.nextBtn.addEventListener('click', () => {
-  if (state.view === 'week') state.anchor.setDate(state.anchor.getDate() + 7);
+  if (state.view === 'week') {
+    const selected = new Date(`${state.selectedDate || fmtDate(state.anchor)}T12:00:00`);
+    state.anchor.setDate(state.anchor.getDate() + 7);
+    selected.setDate(selected.getDate() + 7);
+    state.selectedDate = fmtDate(selected);
+    state.selectedDates = new Set([state.selectedDate]);
+  }
+  else if (state.view === 'year') {
+    state.anchor.setFullYear(state.anchor.getFullYear() + 1);
+    state.selectedDate = fmtDate(state.anchor);
+    state.selectedDates = new Set([state.selectedDate]);
+  }
   else {
     const selectedDay = state.selectedDate ? Number(state.selectedDate.slice(8, 10)) : state.anchor.getDate();
     const target = new Date(state.anchor.getFullYear(), state.anchor.getMonth() + 1, 1);
@@ -1351,6 +1897,24 @@ els.expectedHoursInput.addEventListener('change', () => {
   }).catch((err) => console.error(err));
 });
 
+els.annualVacationDaysInput.addEventListener('change', () => {
+  const year = String(state.anchor.getFullYear());
+  const value = Math.round(parseFloat(els.annualVacationDaysInput.value));
+  state.annualVacationDaysByYear[year] = isNaN(value) || value < 0 ? 0 : value;
+  els.annualVacationDaysInput.value = state.annualVacationDaysByYear[year];
+  renderSummary();
+  api('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ annualVacationDaysByYear: state.annualVacationDaysByYear }),
+  }).catch((err) => console.error(err));
+});
+
+els.vacationSummaryToggle.addEventListener('click', () => {
+  state.showVacationSummary = !state.showVacationSummary;
+  renderSummary();
+});
+
 els.autoLogInput.addEventListener('change', async () => {
   try {
     await api('/api/settings', {
@@ -1358,9 +1922,115 @@ els.autoLogInput.addEventListener('change', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ autoLogEnabled: els.autoLogInput.checked }),
     });
+    renderAutoLogStatus({
+      checkedAt: new Date().toISOString(),
+      outcome: 'checking',
+      message: els.autoLogInput.checked ? 'Auto-log scheduled.' : 'Auto-log disabled.',
+    });
+    setTimeout(() => { void loadAutoLogStatus(); }, 1500);
   } catch (err) {
     els.autoLogInput.checked = !els.autoLogInput.checked; // revert on failure
     setStatus(`Could not update auto-log setting: ${err.message}`, true);
+  }
+});
+
+function renderStatusFilterOptions(container, statuses, selectedIds) {
+  const selected = new Set(selectedIds.map(String));
+  if (!statuses.length) {
+    container.replaceChildren(Object.assign(document.createElement('span'), {
+      className: 'status-filter-empty',
+      textContent: 'No active Jira statuses found.',
+    }));
+    return;
+  }
+  container.replaceChildren(...statuses.map((status) => {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    const statusIds = (status.ids || [status.id]).map(String);
+    input.value = String(status.id);
+    input.dataset.statusIds = statusIds.join(',');
+    input.checked = statusIds.some((id) => selected.has(id));
+    const label = document.createElement('label');
+    label.className = 'status-filter-option';
+    label.append(input, document.createTextNode(status.name));
+    return label;
+  }));
+}
+
+function selectedStatusIds(container) {
+  return [...new Set([...container.querySelectorAll('input[type="checkbox"]:checked')]
+    .flatMap((input) => (input.dataset.statusIds || input.value).split(',').filter(Boolean)))];
+}
+
+async function loadStatusFilters({ refresh = false } = {}) {
+  try {
+    const data = await api(`/api/status-filters${refresh ? '?refresh=true' : ''}`);
+    renderStatusFilterOptions(els.autoLogStatusFilters, data.statuses || [], data.autoLogStatusIds || []);
+    renderStatusFilterOptions(els.taskListStatusFilters, data.statuses || [], data.taskListStatusIds || []);
+    els.statusFilterMessage.textContent = '';
+    els.statusFilterMessage.classList.remove('error');
+  } catch (error) {
+    els.statusFilterMessage.textContent = /Unknown API route:\s*\/api\/status-filters/i.test(error.message)
+      ? 'The extension update is incomplete. Reload JiraLogWork in chrome://extensions, then reopen the calendar.'
+      : `Could not load Jira statuses: ${error.message}`;
+    els.statusFilterMessage.classList.add('error');
+  }
+}
+
+async function saveStatusFilters() {
+  const inputs = [...els.autoLogStatusFilters.querySelectorAll('input'), ...els.taskListStatusFilters.querySelectorAll('input')];
+  inputs.forEach((input) => { input.disabled = true; });
+  els.statusFilterMessage.textContent = 'Saving…';
+  els.statusFilterMessage.classList.remove('error');
+  try {
+    await api('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        autoLogStatusIds: selectedStatusIds(els.autoLogStatusFilters),
+        taskListStatusIds: selectedStatusIds(els.taskListStatusFilters),
+      }),
+    });
+    state.openIssuesCache.clear();
+    els.statusFilterMessage.textContent = 'Saved.';
+  } catch (error) {
+    els.statusFilterMessage.textContent = `Could not save filters: ${error.message}`;
+    els.statusFilterMessage.classList.add('error');
+    await loadStatusFilters();
+  } finally {
+    inputs.forEach((input) => { input.disabled = false; });
+  }
+}
+
+els.autoLogStatusFilters.addEventListener('change', () => { void saveStatusFilters(); });
+els.taskListStatusFilters.addEventListener('change', () => { void saveStatusFilters(); });
+els.syncStatusFiltersBtn.addEventListener('click', async () => {
+  els.syncStatusFiltersBtn.disabled = true;
+  els.statusFilterMessage.textContent = 'Synchronizing…';
+  els.statusFilterMessage.classList.remove('error');
+  try {
+    await loadStatusFilters({ refresh: true });
+    if (!els.statusFilterMessage.classList.contains('error')) els.statusFilterMessage.textContent = 'Statuses synchronized.';
+  } finally {
+    els.syncStatusFiltersBtn.disabled = false;
+  }
+});
+els.resetStatusFiltersBtn.addEventListener('click', async () => {
+  els.resetStatusFiltersBtn.disabled = true;
+  try {
+    await api('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoLogStatusIds: null, taskListStatusIds: null }),
+    });
+    state.openIssuesCache.clear();
+    await loadStatusFilters();
+    els.statusFilterMessage.textContent = 'Defaults restored.';
+  } catch (error) {
+    els.statusFilterMessage.textContent = `Could not reset filters: ${error.message}`;
+    els.statusFilterMessage.classList.add('error');
+  } finally {
+    els.resetStatusFiltersBtn.disabled = false;
   }
 });
 
@@ -1368,6 +2038,10 @@ function setSettingsPanelOpen(open) {
   els.settingsPanel.classList.toggle('open', open);
   els.settingsPanel.setAttribute('aria-hidden', String(!open));
   els.settingsBackdrop.classList.toggle('hidden', !open);
+  if (open) {
+    void loadDiagnostics();
+    void loadAutoLogStatus();
+  }
 }
 
 els.settingsBtn.addEventListener('click', () => setSettingsPanelOpen(true));
@@ -1376,6 +2050,128 @@ els.settingsBackdrop.addEventListener('click', () => setSettingsPanelOpen(false)
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && els.settingsPanel.classList.contains('open')) setSettingsPanelOpen(false);
 });
+
+let displayedDiagnostics = [];
+let displayedAutoLogStatus = null;
+
+function renderAutoLogStatus(status) {
+  displayedAutoLogStatus = status || null;
+  const label = els.autoLogStatus.querySelector('.auto-log-status-label');
+  const message = els.autoLogStatus.querySelector('.auto-log-status-message');
+  els.autoLogStatus.className = `auto-log-status ${status?.outcome || 'idle'}`;
+  label.textContent = status?.checkedAt ? `Auto worklog · Last check ${diagnosticTimeLabel(status.checkedAt)}` : 'Auto worklog · Last check';
+  message.textContent = status?.message || 'No checks recorded.';
+}
+
+async function loadAutoLogStatus() {
+  try {
+    renderAutoLogStatus(await api('/api/auto-log/status'));
+  } catch (error) {
+    console.error('Could not load auto-log status:', error);
+  }
+}
+
+function diagnosticTimeLabel(timestamp) {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? String(timestamp || '') : date.toLocaleString();
+}
+
+function renderDiagnostics(errors) {
+  displayedDiagnostics = Array.isArray(errors) ? errors.slice().reverse() : [];
+  els.copyDiagnosticsBtn.disabled = false;
+  els.clearDiagnosticsBtn.disabled = displayedDiagnostics.length === 0;
+  if (!displayedDiagnostics.length) {
+    const empty = document.createElement('p');
+    empty.className = 'diagnostics-empty';
+    empty.textContent = 'No recorded errors.';
+    els.diagnosticsList.replaceChildren(empty);
+    return;
+  }
+  const rows = displayedDiagnostics.map((entry) => {
+    const article = document.createElement('article');
+    article.className = 'diagnostic-entry';
+    const meta = document.createElement('div');
+    meta.className = 'diagnostic-meta';
+    const context = document.createElement('strong');
+    context.textContent = entry.context || 'Extension';
+    const time = document.createElement('time');
+    time.dateTime = entry.timestamp || '';
+    time.textContent = diagnosticTimeLabel(entry.timestamp);
+    meta.append(context, time);
+    const message = document.createElement('p');
+    message.textContent = entry.message || 'Unknown error';
+    article.append(meta, message);
+    if (entry.stack) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Technical details';
+      const stack = document.createElement('pre');
+      stack.textContent = entry.stack;
+      details.append(summary, stack);
+      article.append(details);
+    }
+    return article;
+  });
+  els.diagnosticsList.replaceChildren(...rows);
+}
+
+async function loadDiagnostics() {
+  try {
+    renderDiagnostics(await api('/api/errors'));
+  } catch (error) {
+    console.error('Could not load diagnostics:', error);
+  }
+}
+
+els.clearDiagnosticsBtn.addEventListener('click', async () => {
+  els.clearDiagnosticsBtn.disabled = true;
+  try {
+    await api('/api/errors', { method: 'DELETE' });
+    renderDiagnostics([]);
+  } catch (error) {
+    setApiError(error, 'Could not clear diagnostics: ');
+    els.clearDiagnosticsBtn.disabled = false;
+  }
+});
+
+els.copyDiagnosticsBtn.addEventListener('click', async () => {
+  const version = chrome.runtime.getManifest().version;
+  const report = [
+    `JiraLogWork ${version}`,
+    `Generated: ${new Date().toISOString()}`,
+    `Browser: ${navigator.userAgent}`,
+    '',
+    'Auto worklog scheduler',
+    displayedAutoLogStatus?.checkedAt ? `Last check: ${displayedAutoLogStatus.checkedAt}` : 'Last check: Not recorded',
+    `Status: ${displayedAutoLogStatus?.outcome || 'unknown'}`,
+    displayedAutoLogStatus?.message || 'No checks recorded.',
+    '',
+    ...displayedDiagnostics.map((entry, index) => [
+      `#${index + 1} ${entry.timestamp || ''} · ${entry.context || 'Extension'}`,
+      entry.message || 'Unknown error',
+      entry.stack || '',
+    ].filter(Boolean).join('\n')),
+  ].join('\n\n');
+  try {
+    await navigator.clipboard.writeText(report);
+    const original = els.copyDiagnosticsBtn.textContent;
+    els.copyDiagnosticsBtn.textContent = 'Copied';
+    setTimeout(() => { els.copyDiagnosticsBtn.textContent = original; }, 1200);
+  } catch (error) {
+    setApiError(error, 'Could not copy diagnostics: ');
+  }
+});
+
+function reportCalendarError(error, context) {
+  const source = error instanceof Error ? error : new Error(String(error || 'Unknown error'));
+  api('/api/errors', {
+    method: 'POST',
+    body: JSON.stringify({ context, message: source.message, stack: source.stack || '' }),
+  }).catch(() => {});
+}
+
+window.addEventListener('error', (event) => reportCalendarError(event.error || event.message, 'Calendar'));
+window.addEventListener('unhandledrejection', (event) => reportCalendarError(event.reason, 'Calendar promise'));
 
 async function saveWorkingPeriods() {
   const previousMorning = state.morningStart;
@@ -1405,7 +2201,7 @@ async function saveHolidaySettings() {
   const previousMode = state.holidayMode;
   state.holidayCountry = els.holidayCountryInput.value;
   state.holidayMode = els.holidayModeInput.value;
-  els.holidayModeInput.disabled = !state.holidayCountry;
+  updateHolidayModeAvailability();
   try {
     await api('/api/settings', {
       method: 'POST',
@@ -1418,13 +2214,31 @@ async function saveHolidaySettings() {
     state.holidayMode = previousMode;
     els.holidayCountryInput.value = previousCountry;
     els.holidayModeInput.value = previousMode;
-    els.holidayModeInput.disabled = !previousCountry;
+    updateHolidayModeAvailability();
     setStatus(`Could not update holiday settings: ${err.message}`, true);
   }
 }
 
 els.holidayCountryInput.addEventListener('change', saveHolidaySettings);
 els.holidayModeInput.addEventListener('change', saveHolidaySettings);
+
+els.addManualHolidayBtn.addEventListener('click', async () => {
+  const dateStr = els.manualHolidayDateInput.value;
+  const name = els.manualHolidayNameInput.value.trim();
+  els.manualHolidayError.classList.add('hidden');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !name) {
+    els.manualHolidayError.textContent = 'Choose a date and enter a holiday name.';
+    els.manualHolidayError.classList.remove('hidden');
+    return;
+  }
+  state.manualHolidays.set(dateStr, { date: dateStr, name, localName: name, manual: true });
+  await saveManualHolidays();
+  els.manualHolidayDateInput.value = '';
+  els.manualHolidayNameInput.value = '';
+  renderManualHolidayList();
+  updateHolidayModeAvailability();
+  await refresh();
+});
 
 // The popup is shown on hover/focus via CSS (:hover, :focus-within), but a
 // click toggle is added too so it also works on touch devices where hover
@@ -1448,14 +2262,45 @@ els.dayDialog.addEventListener('click', (event) => {
   if (event.target === els.dayDialog) els.dayDialog.close();
 });
 
-// Export local OOF markings without exporting credentials or Jira data.
+document.getElementById('dayDialogCloseBtn').addEventListener('click', () => {
+  els.dayDialog.close();
+});
+
+// Enter in a time/number field must only commit that field value — never
+// submit and close the dialog.
+els.dayDialog.addEventListener('submit', (event) => event.preventDefault());
+
+// Export local absence markings and non-sensitive preferences. Credentials,
+// account identity and automatic write settings are deliberately excluded.
 els.exportDataBtn.addEventListener('click', async () => {
-  const { oofByAccount: oof = {} } = await chrome.storage.local.get('oofByAccount');
+  const [{ oofByAccount: oof = {}, vacationByAccount: vacations = {}, manualHolidays = {} }, settings] = await Promise.all([
+    chrome.storage.local.get(['oofByAccount', 'vacationByAccount', 'manualHolidays']),
+    api('/api/settings'),
+  ]);
+  const vacationsByYear = Object.fromEntries(Object.entries(vacations).map(([accountId, dates]) => {
+    const years = {};
+    for (const dateStr of Array.isArray(dates) ? dates : []) (years[dateStr.slice(0, 4)] ||= []).push(dateStr);
+    for (const values of Object.values(years)) values.sort();
+    return [accountId, years];
+  }));
   const payload = {
     format: 'jiralogwork-export',
-    version: 1,
+    version: 6,
     exportedAt: new Date().toISOString(),
     oof,
+    vacations: vacationsByYear,
+    manualHolidays,
+    preferences: {
+      expectedHours: settings.expectedHours,
+      annualVacationDaysByYear: settings.annualVacationDaysByYear || {},
+      morningStart: settings.morningStart,
+      afternoonStart: settings.afternoonStart,
+      holidayCountry: settings.holidayCountry,
+      holidayMode: settings.holidayMode,
+      autoLogStatusIds: settings.autoLogStatusIds,
+      taskListStatusIds: settings.taskListStatusIds,
+      showWeekends: state.showWeekends,
+    },
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -1473,25 +2318,62 @@ els.importDataBtn.addEventListener('click', () => {
   els.importDataInput.click();
 });
 
-// Merges (never overwrites/discards) imported OOF dates into the local
+// Merges (never overwrites/discards) imported absence dates into the local
 // store, per account — accepts both the wrapped export format above and a
-// bare { accountId: [dates] } map for backward compatibility.
+// bare { accountId: [dates] } map for backward compatibility. Preferences
+// are restored only from the explicit safe allow-list below.
 els.importDataInput.addEventListener('change', async () => {
   const file = els.importDataInput.files[0];
   if (!file) return;
   try {
     const parsed = JSON.parse(await file.text());
-    const oofData = parsed && parsed.oof ? parsed.oof : parsed;
+    const oofData = parsed?.oof || (parsed?.format === 'jiralogwork-export' ? {} : parsed);
+    const vacationData = parsed?.vacations || {};
+    const manualHolidayData = parsed?.manualHolidays || {};
     if (!oofData || typeof oofData !== 'object') throw new Error('Unrecognized file format.');
 
-    const { oofByAccount: current = {} } = await chrome.storage.local.get('oofByAccount');
+    const { oofByAccount: current = {}, vacationByAccount: currentVacations = {}, manualHolidays: currentManualHolidays = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount', 'manualHolidays']);
     for (const [accountId, dates] of Object.entries(oofData)) {
       const merged = new Set([...(current[accountId] || []), ...(Array.isArray(dates) ? dates : [])]);
       current[accountId] = Array.from(merged);
     }
-    await chrome.storage.local.set({ oofByAccount: current });
+    for (const [accountId, datesOrYears] of Object.entries(vacationData)) {
+      const importedDates = Array.isArray(datesOrYears)
+        ? datesOrYears
+        : Object.values(datesOrYears || {}).flatMap((dates) => Array.isArray(dates) ? dates : []);
+      const merged = new Set([...(currentVacations[accountId] || []), ...importedDates]);
+      currentVacations[accountId] = Array.from(merged);
+    }
+    for (const [dateStr, holiday] of Object.entries(manualHolidayData)) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr) && holiday && typeof holiday === 'object') currentManualHolidays[dateStr] = holiday;
+    }
+    await chrome.storage.local.set({ oofByAccount: current, vacationByAccount: currentVacations, manualHolidays: currentManualHolidays });
+
+    const preferences = parsed?.preferences;
+    if (preferences && typeof preferences === 'object') {
+      const safeSettings = {};
+      for (const key of ['expectedHours', 'annualVacationDays', 'annualVacationDaysByYear', 'morningStart', 'afternoonStart', 'holidayCountry', 'holidayMode', 'autoLogStatusIds', 'taskListStatusIds']) {
+        if (preferences[key] !== undefined) safeSettings[key] = preferences[key];
+      }
+      if (Object.keys(safeSettings).length) await api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(safeSettings),
+      });
+      if (typeof preferences.showWeekends === 'boolean') {
+        state.showWeekends = preferences.showWeekends;
+        els.showWeekendsInput.checked = state.showWeekends;
+      }
+      await loadSettings();
+      updateWeekendsToggleAvailability();
+      renderWeekdayHeader();
+    }
 
     state.oofDates = await loadOofDates(state.user.accountId);
+    state.vacationDates = await loadVacationDates(state.user.accountId);
+    await loadManualHolidays();
+    renderManualHolidayList();
+    updateHolidayModeAvailability();
     renderGrid();
     renderSummary();
     setStatus('Data imported successfully.');
@@ -1510,6 +2392,17 @@ async function loadSettings() {
       state.expectedHours = s.expectedHours;
       els.expectedHoursInput.value = s.expectedHours;
     }
+    state.annualVacationDaysByYear = { ...(s.annualVacationDaysByYear || {}) };
+    const currentYear = String(new Date().getFullYear());
+    if (!(currentYear in state.annualVacationDaysByYear) && Number.isFinite(Number(s.annualVacationDays)) && Number(s.annualVacationDays) >= 0) {
+      state.annualVacationDaysByYear[currentYear] = Number(s.annualVacationDays);
+      api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ annualVacationDaysByYear: state.annualVacationDaysByYear }),
+      }).catch((err) => console.error(err));
+    }
+    syncVacationEntitlementInputs(state.anchor.getFullYear());
     state.morningStart = s.morningStart || '09:00';
     state.afternoonStart = s.afternoonStart || '14:00';
     els.morningStartInput.value = state.morningStart;
@@ -1518,7 +2411,10 @@ async function loadSettings() {
     state.holidayMode = ['exclude', 'block'].includes(s.holidayMode) ? 'exclude' : 'mark';
     els.holidayCountryInput.value = state.holidayCountry;
     els.holidayModeInput.value = state.holidayMode;
-    els.holidayModeInput.disabled = !state.holidayCountry;
+    await loadStatusFilters();
+    await loadManualHolidays();
+    renderManualHolidayList();
+    updateHolidayModeAvailability();
     // User switching remains disabled by default in this first extension build.
     els.userInput.disabled = !s.allowUserSwitch;
     els.userInput.title = s.allowUserSwitch
@@ -1530,6 +2426,7 @@ async function loadSettings() {
 }
 
 (async function init() {
+  await initializeSettingsSections();
   await migrateLegacyOofData();
   updateWeekendsToggleAvailability();
   renderWeekdayHeader();
@@ -1541,7 +2438,7 @@ async function loadSettings() {
   try {
     await loadMe();
   } catch (err) {
-    setStatus(`Error loading default user: ${err.message}`, true);
+    setApiError(err);
     return;
   }
   await loadSettings();

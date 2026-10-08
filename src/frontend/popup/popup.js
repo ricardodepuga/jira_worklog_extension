@@ -1,14 +1,31 @@
 const $ = (id) => document.getElementById(id);
+let expectedHoursPerDay = 7;
+let savedConnection = null;
 const today = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 async function api(path, options = {}) {
   const response = await chrome.runtime.sendMessage({ type: 'api', path, options });
-  if (!response?.ok) throw new Error(response?.error || 'Extension service unavailable.');
+  if (!response?.ok) {
+    const error = new Error(response?.error || 'Extension service unavailable.');
+    error.code = response?.code;
+    error.site = response?.site;
+    throw error;
+  }
   return response.data;
 }
 $('calendar').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('src/frontend/calendar/calendar.html') });
+
+function showError(error) {
+  const status = $('status');
+  status.className = 'error';
+  if (error.code !== 'JIRA_AUTH_REQUIRED') {
+    status.textContent = error.message;
+    return;
+  }
+  showSetup(`${error.message} The Jira browser login is not used.`);
+}
 
 function formatTimeLabel(time) { return time.replace(/^0/, ''); }
 function applyWorkingPeriods(settings) {
@@ -22,9 +39,15 @@ function applyWorkingPeriods(settings) {
   $('time').value = morning;
 }
 
-function showSetup() {
+function showSetup(message = '') {
   document.body.className = 'is-setup';
-  $('status').textContent = '';
+  $('status').className = message ? 'error' : '';
+  $('status').textContent = message;
+  if (savedConnection) {
+    $('setupSite').value = savedConnection.site || '';
+    $('setupEmail').value = savedConnection.email || '';
+  }
+  $('setupToken').value = '';
   $('form').hidden = true;
   $('setupForm').hidden = false;
 }
@@ -35,7 +58,7 @@ function updateSuggestedHours() {
   const now = new Date();
   const elapsedMinutes = now.getHours() * 60 + now.getMinutes() - (startHour * 60 + startMinute);
   const halfHourUnits = Math.max(1, Math.round(elapsedMinutes / 30));
-  $('hours').value = Math.min(24, halfHourUnits / 2);
+  $('hours').value = Math.min(expectedHoursPerDay, halfHourUnits / 2);
   document.querySelectorAll('.time-quick-btn').forEach((button) => {
     button.classList.toggle('active', button.dataset.time === $('time').value);
   });
@@ -51,6 +74,11 @@ $('time').addEventListener('change', updateSuggestedHours);
 
 async function loadWorklogForm() {
   const [me, settings] = await Promise.all([api('/api/me'), api('/api/settings')]);
+  const configuredExpectedHours = Number(settings.expectedHours);
+  expectedHoursPerDay = Number.isFinite(configuredExpectedHours) && configuredExpectedHours > 0
+    ? configuredExpectedHours
+    : 7;
+  $('hours').max = String(expectedHoursPerDay);
   applyWorkingPeriods(settings);
   const issues = await api(`/api/issues/open?accountId=${encodeURIComponent(me.accountId)}&date=${today()}`);
   $('setupForm').hidden = true;
@@ -89,8 +117,7 @@ async function loadWorklogForm() {
       $('status').textContent = 'Worklog added successfully.';
       $('comment').value = '';
     } catch (error) {
-      $('status').textContent = error.message;
-      $('status').className = 'error';
+      showError(error);
     } finally {
       $('save').disabled = false;
     }
@@ -114,8 +141,7 @@ $('setupForm').onsubmit = async (event) => {
     $('setupToken').value = '';
     await loadWorklogForm();
   } catch (error) {
-    $('status').textContent = error.message;
-    $('status').className = 'error';
+    showError(error);
   } finally {
     $('connect').disabled = false;
   }
@@ -124,14 +150,14 @@ $('setupForm').onsubmit = async (event) => {
 async function init() {
   try {
     const config = await api('/api/config/status');
+    savedConnection = config;
     if (!config.configured) {
       showSetup();
       return;
     }
     await loadWorklogForm();
   } catch (error) {
-    $('status').textContent = error.message;
-    $('status').className = 'error';
+    showError(error);
   }
 }
 init();

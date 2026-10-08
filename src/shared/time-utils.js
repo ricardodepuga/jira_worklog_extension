@@ -64,13 +64,36 @@
     return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1 : 0));
   }
 
-  // `issues` has { key, reviewMinute }. A review transition caps work on that
-  // issue and advances the following task to the exact transition time.
+  function shouldUseAssignmentHistory(date, today) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(date || '') && date <= today;
+  }
+
+  // Dated Jira search already establishes that the issue was assigned to the
+  // requested user at some point on the selected date. Reassignment later that
+  // day must not hide work the user may still need to register.
+  function isDatedIssueEligible({ statusId, allowedStatusIds, wasAssignedOnDate }) {
+    return Boolean(wasAssignedOnDate && Array.isArray(allowedStatusIds) && allowedStatusIds.map(String).includes(String(statusId)));
+  }
+
+  function nextDailyRunTime(nowInput, hour, recoverToday = false) {
+    const now = new Date(nowInput);
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 0, 0);
+    if (now < target) return target.getTime();
+    if (recoverToday) return now.getTime() + 1000;
+    target.setDate(target.getDate() + 1);
+    return target.getTime();
+  }
+
+  // `issues` has { key, isReview, reviewMinute }. A review transition made on
+  // the auto-log date caps work on that issue and advances the following task
+  // to the exact transition time. Issues already in Review before that date
+  // are not work performed on the auto-log date and must be ignored.
   function planAutoWorklogs(issues, hours, morningStart, halfHourSeconds = 1800) {
     let remainingUnits = Math.round(hours * 2);
-    if (!issues.length || !remainingUnits) return [];
-    const reviewed = issues.filter((issue) => issue.reviewMinute !== null).sort((a, b) => a.reviewMinute - b.reviewMinute);
-    const ongoing = issues.filter((issue) => issue.reviewMinute === null);
+    const eligibleIssues = issues.filter((issue) => !issue.isReview || issue.reviewMinute !== null);
+    if (!eligibleIssues.length || !remainingUnits) return [];
+    const reviewed = eligibleIssues.filter((issue) => issue.reviewMinute !== null).sort((a, b) => a.reviewMinute - b.reviewMinute);
+    const ongoing = eligibleIssues.filter((issue) => issue.reviewMinute === null);
     const plan = [];
     let cursor = timeToMinutes(morningStart || '09:00');
 
@@ -91,7 +114,7 @@
     return plan;
   }
 
-  const api = { effectiveTimeZone, zonedParts, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, timeToMinutes, minutesToTime, planAutoWorklogs };
+  const api = { effectiveTimeZone, zonedParts, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, timeToMinutes, minutesToTime, shouldUseAssignmentHistory, isDatedIssueEligible, nextDailyRunTime, planAutoWorklogs };
   globalThis.JiraLogWorkTime = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();
