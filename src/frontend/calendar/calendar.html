@@ -47,8 +47,8 @@
       <button type="button" id="settingsCloseBtn" class="close-btn" aria-label="Close settings">✕</button>
     </header>
     <div class="settings-body">
-      <section class="settings-section">
-        <h3>Calendar</h3>
+      <details class="settings-section" data-settings-section="calendar">
+        <summary>Calendar</summary>
         <div class="checkbox-group">
           <label class="option-checkbox" id="weekendsToggleLabel">
             <input id="showWeekendsInput" type="checkbox" />
@@ -59,10 +59,10 @@
             <input id="autoLogInput" type="checkbox" />
             Auto worklog
             <span class="info-icon" id="autoLogInfoIcon" tabindex="0" role="button" aria-label="What does this do?">
-              ⓘ
+              <span class="info-icon-mark" aria-hidden="true">i</span>
               <div class="info-popup" id="autoLogInfoPopup">
                 Daily at 18:00, auto-fills empty workdays by splitting your expected
-                hours across your in-progress Jira issues. Skips weekends and days
+                hours across Jira issues in the statuses selected under Task filters. Skips weekends and days
                 already logged. Marked "auto" so you can spot them later.
               </div>
             </span>
@@ -81,18 +81,42 @@
             </label>
           </div>
         </div>
-      </section>
+      </details>
 
-      <section class="settings-section">
-        <h3>Working periods</h3>
+      <details class="settings-section" data-settings-section="working-periods">
+        <summary>Working periods</summary>
         <div class="working-periods">
           <label>Morning starts<input id="morningStartInput" type="time" step="1800" value="09:00" /></label>
           <label>Afternoon starts<input id="afternoonStartInput" type="time" step="1800" value="14:00" /></label>
         </div>
-      </section>
+      </details>
 
-      <section class="settings-section">
-        <h3>Public holidays</h3>
+      <details class="settings-section" data-settings-section="task-filters">
+        <summary><span>Task filters</span><small>Jira statuses</small></summary>
+        <p class="status-filter-help">Choose from statuses currently used by your assigned active tasks. To Do and Done statuses remain excluded.</p>
+        <div class="status-filter-grid">
+          <fieldset>
+            <legend>Auto worklog</legend>
+            <p>Statuses that may receive automatic worklogs.</p>
+            <div id="autoLogStatusFilters" class="status-filter-list"><span class="status-filter-empty">Loading statuses…</span></div>
+          </fieldset>
+          <fieldset>
+            <legend>Task suggestions</legend>
+            <p>Statuses shown when selecting a task manually.</p>
+            <div id="taskListStatusFilters" class="status-filter-list"><span class="status-filter-empty">Loading statuses…</span></div>
+          </fieldset>
+        </div>
+        <div class="status-filter-footer">
+          <div id="statusFilterMessage" class="status-filter-message" aria-live="polite"></div>
+          <div class="status-filter-actions">
+            <button type="button" id="syncStatusFiltersBtn">Sync statuses</button>
+            <button type="button" id="resetStatusFiltersBtn">Reset defaults</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="settings-section" data-settings-section="public-holidays">
+        <summary>Custom holidays</summary>
         <div class="holiday-settings">
           <label>Public holidays
             <select id="holidayCountryInput">
@@ -136,10 +160,10 @@
           <div id="manualHolidayError" class="form-error hidden"></div>
           <div id="manualHolidayList" class="manual-holiday-list"></div>
         </div>
-      </section>
+      </details>
 
-      <section class="settings-section">
-        <h3>Data and connection</h3>
+      <details class="settings-section" data-settings-section="data-connection">
+        <summary>Data and connection</summary>
         <div class="data-actions">
           <button type="button" id="manageCredentialsBtn" class="export-btn icon-btn" title="Jira connection" aria-label="Manage Jira connection">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 14.5 5 17a3 3 0 0 0 4.24 4.24l3.26-3.26a3 3 0 0 0 0-4.24"/><path d="m16.5 9.5 2.5-2.5a3 3 0 0 0-4.24-4.24L11.5 6.02a3 3 0 0 0 0 4.24"/><path d="m9 15 6-6"/></svg>
@@ -152,7 +176,22 @@
           </button>
           <input type="file" id="importDataInput" accept="application/json" hidden />
         </div>
-      </section>
+      </details>
+
+      <details class="settings-section diagnostics-section" data-settings-section="diagnostics">
+        <summary><span>Diagnostics</span><small>System status</small></summary>
+        <p class="diagnostics-help">Scheduler status and local error details that can be copied when reporting a bug. API tokens and request contents are not included.</p>
+        <div id="autoLogStatus" class="auto-log-status">
+          <span class="auto-log-status-label">Auto worklog · Last check</span>
+          <span class="auto-log-status-message">No checks recorded.</span>
+        </div>
+        <h4 class="diagnostics-subheading">Recent errors <span>Last 5</span></h4>
+        <div id="diagnosticsList" class="diagnostics-list"></div>
+        <div class="diagnostics-actions">
+          <button type="button" id="copyDiagnosticsBtn">Copy report</button>
+          <button type="button" id="clearDiagnosticsBtn" class="danger">Clear errors</button>
+        </div>
+      </details>
     </div>
   </aside>
 

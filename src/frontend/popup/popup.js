@@ -1,5 +1,6 @@
 const $ = (id) => document.getElementById(id);
 let expectedHoursPerDay = 7;
+let savedConnection = null;
 const today = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -19,16 +20,11 @@ $('calendar').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('s
 function showError(error) {
   const status = $('status');
   status.className = 'error';
-  if (error.code !== 'JIRA_AUTH_REQUIRED' || !error.site) {
+  if (error.code !== 'JIRA_AUTH_REQUIRED') {
     status.textContent = error.message;
     return;
   }
-  const link = document.createElement('a');
-  link.href = `https://${error.site}`;
-  link.target = '_blank';
-  link.rel = 'noopener';
-  link.textContent = 'Open Jira login';
-  status.replaceChildren(document.createTextNode(`${error.message} `), link);
+  showSetup(`${error.message} The Jira browser login is not used.`);
 }
 
 function formatTimeLabel(time) { return time.replace(/^0/, ''); }
@@ -43,9 +39,15 @@ function applyWorkingPeriods(settings) {
   $('time').value = morning;
 }
 
-function showSetup() {
+function showSetup(message = '') {
   document.body.className = 'is-setup';
-  $('status').textContent = '';
+  $('status').className = message ? 'error' : '';
+  $('status').textContent = message;
+  if (savedConnection) {
+    $('setupSite').value = savedConnection.site || '';
+    $('setupEmail').value = savedConnection.email || '';
+  }
+  $('setupToken').value = '';
   $('form').hidden = true;
   $('setupForm').hidden = false;
 }
@@ -148,6 +150,7 @@ $('setupForm').onsubmit = async (event) => {
 async function init() {
   try {
     const config = await api('/api/config/status');
+    savedConnection = config;
     if (!config.configured) {
       showSetup();
       return;

@@ -1,20 +1,27 @@
-importScripts('../shared/time-utils.js');
+importScripts('../shared/time-utils.js', '../shared/diagnostics-utils.js', '../shared/jira-utils.js');
 
-const { effectiveTimeZone, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, shouldUseAssignmentHistory, isDatedIssueEligible, planAutoWorklogs } = globalThis.JiraLogWorkTime;
+const { effectiveTimeZone, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, shouldUseAssignmentHistory, isDatedIssueEligible, nextDailyRunTime, planAutoWorklogs } = globalThis.JiraLogWorkTime;
+const { createDiagnosticEntry, keepLatestDiagnostics } = globalThis.JiraLogWorkDiagnostics;
+const { findStoryPointsFieldIds, isRetryableJiraStatus, shouldTryAlternateJiraEndpoint, activeWorkflowStatuses, effectiveStatusIds, relevantWorkflowStatuses, isLegacyBroadStatusSelection, manualIssueKeys } = globalThis.JiraLogWorkJira;
 
 const DEFAULTS = {
   config: { site: '', email: '', apiToken: '' },
-  settings: { autoLogEnabled: false, expectedHours: 7, annualVacationDays: 22, annualVacationDaysByYear: {}, lastAutoLogDate: null, allowUserSwitch: false, holidayCountry: '', holidayMode: 'mark', morningStart: '09:00', afternoonStart: '14:00' },
+  settings: { autoLogEnabled: false, expectedHours: 7, annualVacationDays: 22, annualVacationDaysByYear: {}, lastAutoLogDate: null, allowUserSwitch: false, holidayCountry: '', holidayMode: 'mark', morningStart: '09:00', afternoonStart: '14:00', autoLogStatusIds: null, taskListStatusIds: null },
   me: null,
   oofByAccount: {},
   vacationByAccount: {},
   manualHolidays: {},
+  extensionErrors: [],
+  autoLogStatus: null,
 };
 
 const AUTO_LOG_MARKER = '[auto]';
 const AUTO_LOG_COMMENT = `${AUTO_LOG_MARKER} Auto-logged by the LogWork scheduler`;
 const HALF_HOUR_SECONDS = 1800;
+const AUTO_LOG_ALARM = 'auto-log-check';
+const AUTO_LOG_HOUR = 18;
 const AUTO_LOG_SAFETY_RESET_KEY = 'autoLogSafetyResetV1';
+const STATUS_FILTER_CLEANUP_KEY = 'statusFilterCleanupV1';
 
 // One-time safety migration for builds affected by the old settings race.
 // It intentionally requires the user to opt in to auto-log again.
@@ -26,8 +33,21 @@ const safetyMigration = chrome.storage.local.get(['settings', AUTO_LOG_SAFETY_RE
   });
 });
 
+// Early builds of configurable status filters saved the entire site-wide Jira
+// status catalogue when either filter changed. Clear only those unmistakably
+// broad legacy selections so the new relevant-status defaults can take over.
+const storageInitialization = safetyMigration.then(async () => {
+  const value = await chrome.storage.local.get(['settings', STATUS_FILTER_CLEANUP_KEY]);
+  if (value[STATUS_FILTER_CLEANUP_KEY]) return;
+  const settings = { ...DEFAULTS.settings, ...(value.settings || {}) };
+  for (const key of ['autoLogStatusIds', 'taskListStatusIds']) {
+    if (isLegacyBroadStatusSelection(settings[key])) settings[key] = null;
+  }
+  await chrome.storage.local.set({ settings, [STATUS_FILTER_CLEANUP_KEY]: true });
+});
+
 async function stored() {
-  await safetyMigration;
+  await storageInitialization;
   const value = await chrome.storage.local.get(DEFAULTS);
   return {
     config: { ...DEFAULTS.config, ...(value.config || {}) },
@@ -42,7 +62,42 @@ async function stored() {
     oofByAccount: value.oofByAccount || {},
     vacationByAccount: value.vacationByAccount || {},
     manualHolidays: value.manualHolidays || {},
+    extensionErrors: Array.isArray(value.extensionErrors) ? value.extensionErrors : [],
+    autoLogStatus: value.autoLogStatus || null,
   };
+}
+
+let diagnosticsWriteQueue = Promise.resolve();
+
+function recordExtensionError(error, context) {
+  const operation = diagnosticsWriteQueue.then(async () => {
+    const { extensionErrors = [] } = await chrome.storage.local.get('extensionErrors');
+    const entry = createDiagnosticEntry(error, context);
+    await chrome.storage.local.set({ extensionErrors: keepLatestDiagnostics(extensionErrors, entry) });
+    return entry;
+  });
+  diagnosticsWriteQueue = operation.catch(() => {});
+  return operation.catch((storageError) => {
+    console.error('Could not persist extension diagnostic:', storageError);
+    return null;
+  });
+}
+
+function apiErrorContext(path, options = {}) {
+  let pathname = 'unknown route';
+  try { pathname = new URL(path, 'https://extension.local').pathname; } catch (_) {}
+  return `API ${String(options.method || 'GET').toUpperCase()} ${pathname}`;
+}
+
+async function setAutoLogStatus(outcome, message, details = {}) {
+  const autoLogStatus = {
+    checkedAt: new Date().toISOString(),
+    outcome,
+    message,
+    ...details,
+  };
+  await chrome.storage.local.set({ autoLogStatus });
+  return autoLogStatus;
 }
 
 // Settings writes can arrive very close together (for example changing the
@@ -52,6 +107,7 @@ let settingsWriteQueue = Promise.resolve();
 
 function updateSettings(patch) {
   const operation = settingsWriteQueue.then(async () => {
+    await storageInitialization;
     const { settings: persisted = {} } = await chrome.storage.local.get('settings');
     const settings = {
       ...DEFAULTS.settings,
@@ -99,6 +155,15 @@ function updateSettings(patch) {
       if (!['mark', 'exclude', 'block'].includes(patch.holidayMode)) throw new Error('Choose a valid holiday mode.');
       settings.holidayMode = patch.holidayMode === 'block' ? 'exclude' : patch.holidayMode;
     }
+    for (const key of ['autoLogStatusIds', 'taskListStatusIds']) {
+      if (patch[key] === undefined) continue;
+      if (patch[key] === null) {
+        settings[key] = null;
+        continue;
+      }
+      if (!Array.isArray(patch[key])) throw new Error('Jira status filters must be a list.');
+      settings[key] = [...new Set(patch[key].map((id) => String(id).trim()).filter(Boolean))];
+    }
     for (const key of ['morningStart', 'afternoonStart']) {
       if (patch[key] === undefined) continue;
       const time = String(patch[key]);
@@ -124,7 +189,6 @@ function validateSite(site) {
 
 const jiraApiBaseBySite = new Map();
 const jiraCloudIdBySite = new Map();
-const jiraSessionSites = new Set();
 
 function directJiraApiBase(site) {
   return `https://${site}/rest/api/3`;
@@ -132,11 +196,7 @@ function directJiraApiBase(site) {
 
 async function scopedJiraApiBase(site) {
   if (!jiraCloudIdBySite.has(site)) {
-    const response = await fetch(`https://${site}/_edge/tenant_info`, {
-      credentials: 'omit',
-      cache: 'no-store',
-      headers: { Accept: 'application/json' },
-    });
+    const response = await jiraRequest(`https://${site}`, '/_edge/tenant_info', {});
     if (!response.ok) throw new Error('Could not determine the Jira Cloud ID.');
     const data = await response.json();
     if (!data.cloudId) throw new Error('The Jira site did not return a Cloud ID.');
@@ -145,22 +205,46 @@ async function scopedJiraApiBase(site) {
   return `https://api.atlassian.com/ex/jira/${encodeURIComponent(jiraCloudIdBySite.get(site))}/rest/api/3`;
 }
 
-function jiraRequest(base, pathname, options, authorization = null, credentials = 'omit') {
-  return fetch(`${base}${pathname}`, {
-    ...options,
-    credentials,
-    cache: 'no-store',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(authorization ? { Authorization: authorization } : {}),
-      ...(options.headers || {}),
-    },
-  });
+async function jiraRequest(base, pathname, options, authorization = null, credentials = 'omit') {
+  let lastCause;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(`${base}${pathname}`, {
+        ...options,
+        credentials,
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          ...(authorization ? { Authorization: authorization } : {}),
+          ...(options.headers || {}),
+        },
+      });
+      if (attempt === 0 && isRetryableJiraStatus(response.status)) {
+        const retryAfter = Number(response.headers.get('Retry-After'));
+        await new Promise((resolve) => setTimeout(resolve, Number.isFinite(retryAfter) ? Math.min(retryAfter * 1000, 3000) : 350));
+        continue;
+      }
+      return response;
+    } catch (cause) {
+      lastCause = cause;
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        continue;
+      }
+    }
+  }
+  const error = new Error('Could not reach Jira. Check the network connection.');
+  error.code = 'JIRA_NETWORK_ERROR';
+  error.cause = lastCause;
+  if (lastCause?.stack || lastCause?.message) error.stack += `\nCaused by: ${lastCause.stack || lastCause.message}`;
+  throw error;
 }
 
 function jiraConnectionError(site, status) {
-  const error = new Error(status === 403 ? 'Jira denied access.' : 'Jira sign-in required.');
+  const error = new Error(status === 403
+    ? 'Jira denied access. Update the saved API credentials.'
+    : 'Could not authenticate with Jira. Update the saved email and API token.');
   error.code = 'JIRA_AUTH_REQUIRED';
   error.site = site;
   return error;
@@ -174,21 +258,17 @@ async function jiraFetch(pathname, options = {}) {
   let activeBase = cachedBase || directBase;
   const authorization = `Basic ${btoa(`${config.email}:${config.apiToken}`)}`;
   let response;
-
-  // If this service-worker lifetime has already authenticated through the Jira
-  // browser session, use it first. Should that session expire, fall back to the
-  // configured API token paths below.
-  if (jiraSessionSites.has(config.site)) {
-    response = await jiraRequest(directBase, pathname, options, null, 'include');
-    if (!response.ok && [401, 403].includes(response.status)) jiraSessionSites.delete(config.site);
+  try {
+    response = await jiraRequest(activeBase, pathname, options, authorization);
+  } catch (error) {
+    jiraApiBaseBySite.delete(config.site);
+    throw error;
   }
-
-  if (!response?.ok) response = await jiraRequest(activeBase, pathname, options, authorization);
 
   // Classic tokens use the site URL. Scoped tokens use Atlassian's API
   // gateway and the site's Cloud ID. Atlassian does not expose the token type,
   // so try the alternate official endpoint only after an authentication error.
-  if (response.status === 401 || (!cachedBase && response.status === 403)) {
+  if (shouldTryAlternateJiraEndpoint(response.status, pathname, Boolean(cachedBase))) {
     try {
       const alternateBase = activeBase === directBase
         ? await scopedJiraApiBase(config.site)
@@ -203,24 +283,13 @@ async function jiraFetch(pathname, options = {}) {
     }
   }
 
-  // Keep the former, useful behaviour as a final fallback: when neither token
-  // endpoint accepts the credentials, an existing Jira browser session can
-  // still authorize the extension. This request deliberately has no Basic
-  // Authorization header, so Jira can evaluate its session cookie instead.
-  if (!response.ok && [401, 403].includes(response.status)) {
-    try {
-      const sessionResponse = await jiraRequest(directBase, pathname, options, null, 'include');
-      if (sessionResponse.ok || sessionResponse.status === 403) response = sessionResponse;
-      if (sessionResponse.ok) jiraSessionSites.add(config.site);
-    } catch (error) {
-      console.warn('Could not try the Jira browser session:', error);
-    }
-  }
-
-  if (response.ok && !jiraSessionSites.has(config.site)) jiraApiBaseBySite.set(config.site, activeBase);
+  if (response.ok) jiraApiBaseBySite.set(config.site, activeBase);
   if (!response.ok) {
+    if (isRetryableJiraStatus(response.status)) jiraApiBaseBySite.delete(config.site);
     const body = await response.text().catch(() => '');
-    if (response.status === 401 || response.status === 403) throw jiraConnectionError(config.site, response.status);
+    if (response.status === 401 || response.status === 403 || (pathname === '/myself' && response.status === 404)) {
+      throw jiraConnectionError(config.site, response.status);
+    }
     throw new Error(`Jira API ${response.status} ${response.statusText}: ${body.slice(0, 400)}`);
   }
   return response.status === 204 ? null : response.json();
@@ -261,6 +330,15 @@ async function resolveMe() {
   return me;
 }
 
+async function revalidateJiraConnection() {
+  const { config } = await stored();
+  // Force endpoint discovery again. This mirrors the successful page-refresh
+  // path and prevents a stale classic/scoped API-base choice from turning a
+  // valid issue/worklog request into a misleading Jira 404.
+  jiraApiBaseBySite.delete(config.site);
+  return resolveMe();
+}
+
 function adfToText(comment) {
   if (!comment) return null;
   if (typeof comment === 'string') return comment;
@@ -286,19 +364,33 @@ function parseAutoMarker(text) {
 
 async function findIssuesWithWorklogs(accountId, start, end) {
   const jql = `worklogAuthor = "${accountId}" AND worklogDate >= "${start}" AND worklogDate <= "${end}" ORDER BY updated DESC`;
-  const issues = [];
-  const storyPointsFieldId = await getStoryPointsFieldId();
-  const fields = ['summary', 'project', 'timeoriginalestimate', 'timeestimate', ...(storyPointsFieldId ? [storyPointsFieldId] : [])];
-  let nextPageToken;
-  do {
-    const data = await jiraFetch('/search/jql', {
-      method: 'POST',
-      body: JSON.stringify({ jql, fields, maxResults: 100, ...(nextPageToken ? { nextPageToken } : {}) }),
-    });
-    issues.push(...(data.issues || []));
-    nextPageToken = data.nextPageToken;
-  } while (nextPageToken);
-  return issues;
+  const storyPointsFieldIds = await optionalStoryPointsFieldIds();
+  const fields = ['summary', 'project', 'timeoriginalestimate', 'timeestimate', ...storyPointsFieldIds];
+  const search = async () => {
+    const issues = [];
+    let nextPageToken;
+    do {
+      const data = await jiraFetch('/search/jql', {
+        method: 'POST',
+        body: JSON.stringify({ jql, fields, maxResults: 100, ...(nextPageToken ? { nextPageToken } : {}) }),
+      });
+      issues.push(...(data.issues || []));
+      nextPageToken = data.nextPageToken;
+    } while (nextPageToken);
+    return issues;
+  };
+
+  let issues = await search();
+  if (!issues.length) {
+    // A long-lived calendar page can outlive the service worker connection.
+    // Revalidate the token owner, discard the selected API base and repeat the
+    // query once before accepting an empty period as genuine.
+    const { config } = await stored();
+    jiraApiBaseBySite.delete(config.site);
+    await jiraFetch('/myself');
+    issues = await search();
+  }
+  return { issues, storyPointsFieldIds };
 }
 
 async function issueWorklogs(issueKey) {
@@ -314,7 +406,7 @@ async function issueWorklogs(issueKey) {
 }
 
 async function getWorklogs(accountId, start, end) {
-  const issues = await findIssuesWithWorklogs(accountId, start, end);
+  const { issues, storyPointsFieldIds } = await findIssuesWithWorklogs(accountId, start, end);
   const byDate = {};
   for (const issue of issues) {
     const own = (await issueWorklogs(issue.key))
@@ -334,7 +426,7 @@ async function getWorklogs(accountId, start, end) {
         worklogId: worklog.id,
         started: worklog.started,
         taskTotalToDateSeconds: own.filter((w) => w.day <= worklog.day).reduce((sum, w) => sum + w.timeSpentSeconds, 0),
-        storyPoints: storyPointsFieldId ? issue.fields?.[storyPointsFieldId] ?? null : null,
+        storyPoints: storyPointsFieldIds.map((fieldId) => issue.fields?.[fieldId]).find((value) => value !== null && value !== undefined) ?? null,
         originalEstimateSeconds: issue.fields?.timeoriginalestimate ?? null,
         remainingEstimateSeconds: issue.fields?.timeestimate ?? null,
       });
@@ -392,16 +484,29 @@ function todayStr() {
 
 let jiraStatusesPromise;
 async function getJiraStatuses() {
-  if (!jiraStatusesPromise) jiraStatusesPromise = jiraFetch('/status');
+  if (!jiraStatusesPromise) {
+    jiraStatusesPromise = jiraFetch('/status').catch((error) => {
+      jiraStatusesPromise = null;
+      throw error;
+    });
+  }
   return jiraStatusesPromise;
 }
 
-async function getInProgressStatusNames() {
-  const statuses = await getJiraStatuses();
-  return [...new Set(statuses
-    .filter((status) => status.statusCategory?.name === 'In Progress')
-    .map((status) => status.name)
-  )];
+async function statusFilter(purpose) {
+  const [state, statuses] = await Promise.all([stored(), getJiraStatuses()]);
+  const settingKey = purpose === 'autoLog' ? 'autoLogStatusIds' : 'taskListStatusIds';
+  const ids = effectiveStatusIds(state.settings[settingKey], statuses, purpose);
+  return { ids, idSet: new Set(ids), statuses: activeWorkflowStatuses(statuses) };
+}
+
+async function assignedActiveStatusIds(accountId) {
+  const jql = `assignee = ${quoteJqlValue(accountId)} AND statusCategory = "In Progress" ORDER BY updated DESC`;
+  const data = await jiraFetch('/search/jql', {
+    method: 'POST',
+    body: JSON.stringify({ jql, fields: ['status'], maxResults: 100 }),
+  });
+  return [...new Set((data.issues || []).map((issue) => String(issue.fields?.status?.id || '')).filter(Boolean))];
 }
 
 function quoteJqlValue(value) {
@@ -421,7 +526,7 @@ async function fetchIssueChangelog(issueKey) {
   return histories;
 }
 
-async function wasEligibleAtDateCutoff(issue, date) {
+async function wasEligibleAtDateCutoff(issue, date, allowedStatusIds) {
   const [state, statuses, histories] = await Promise.all([
     stored(),
     getJiraStatuses(),
@@ -444,25 +549,35 @@ async function wasEligibleAtDateCutoff(issue, date) {
     (!statusId && statusName && candidate.name === statusName)
   );
   return isDatedIssueEligible({
-    statusCategoryName: status?.statusCategory?.name,
+    statusId: status?.id,
+    allowedStatusIds,
     // The dated JQL candidate set already guarantees this condition.
     wasAssignedOnDate: true,
   });
 }
 
-async function searchIssues(accountId, date, query = '') {
+async function searchIssues(accountId, date, query = '', projectKeys = [], purpose = 'taskList') {
   const today = todayStr();
   const datedAssignment = shouldUseAssignmentHistory(date, today);
+  const q = query.trim();
+  const directKeys = manualIssueKeys(q, projectKeys);
+  const filter = await statusFilter(purpose);
+  if (!filter.ids.length) return [];
+  const statusJql = `status in (${filter.ids.map(quoteJqlValue).join(', ')})`;
   let jql;
-  if (datedAssignment) {
+  if (directKeys.length) {
+    // An explicitly entered key is a manual override of the assignment/date
+    // suggestion rules. Keep the product rule that To Do and Done issues are
+    // not valid worklog suggestions.
+    jql = `key in (${directKeys.map(quoteJqlValue).join(', ')}) AND ${statusJql} ORDER BY updated DESC`;
+  } else if (datedAssignment) {
     // Do not pre-filter dated status through JQL. The changelog/current status
     // below is the source of truth, while WAS keeps tasks reassigned that day.
     jql = `assignee WAS "${accountId}" ON "${date}" ORDER BY updated DESC`;
   } else {
-    jql = `assignee = "${accountId}" AND statusCategory = "In Progress" ORDER BY updated DESC`;
+    jql = `assignee = "${accountId}" AND ${statusJql} ORDER BY updated DESC`;
   }
-  const q = query.trim();
-  if (q) {
+  if (q && !directKeys.length) {
     const escaped = q.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const filter = /^[A-Za-z][A-Za-z0-9]+-\d*$/.test(q)
       ? `(key = "${q.toUpperCase()}" OR summary ~ "${escaped}*")`
@@ -471,40 +586,64 @@ async function searchIssues(accountId, date, query = '') {
   }
   const data = await jiraFetch('/search/jql', { method: 'POST', body: JSON.stringify({ jql, fields: ['summary', 'status', 'project'], maxResults: 100 }) });
   const candidates = data.issues || [];
-  const issues = !datedAssignment
-    ? candidates
+  const issues = directKeys.length || !datedAssignment
+    ? candidates.filter((issue) => filter.idSet.has(String(issue.fields?.status?.id || '')))
     : date === today
       // For today, Jira already returns the current status category. Avoid a
       // changelog request per suggestion; only past dates need reconstruction.
       ? candidates.filter((issue) => isDatedIssueEligible({
-        statusCategoryName: issue.fields?.status?.statusCategory?.name,
+        statusId: issue.fields?.status?.id,
+        allowedStatusIds: filter.ids,
         wasAssignedOnDate: true,
       }))
-      : (await Promise.all(candidates.map(async (issue) => ({ issue, eligible: await wasEligibleAtDateCutoff(issue, date) })))).filter((result) => result.eligible).map((result) => result.issue);
+      : (await Promise.all(candidates.map(async (issue) => ({ issue, eligible: await wasEligibleAtDateCutoff(issue, date, filter.ids) })))).filter((result) => result.eligible).map((result) => result.issue);
   return issues.map((i) => ({ key: i.key, summary: i.fields?.summary || '', status: i.fields?.status?.name || '', projectKey: i.fields?.project?.key || '' }));
 }
 
 async function inProgressIssues(accountId, date) {
-  return searchIssues(accountId, date);
+  return searchIssues(accountId, date, '', [], 'autoLog');
 }
 
-let storyPointsFieldId;
-async function getStoryPointsFieldId() {
-  if (storyPointsFieldId === undefined) {
-    const fields = await jiraFetch('/field');
-    storyPointsFieldId = fields.find((field) => /story point/i.test(field.name || ''))?.id || null;
+const storyPointsFieldIdsBySite = new Map();
+async function getStoryPointsFieldIds() {
+  const { config } = await stored();
+  const site = config.site;
+  if (storyPointsFieldIdsBySite.has(site)) return storyPointsFieldIdsBySite.get(site);
+
+  const { storyPointsFieldsBySite = {} } = await chrome.storage.local.get('storyPointsFieldsBySite');
+  if (Array.isArray(storyPointsFieldsBySite[site]) && storyPointsFieldsBySite[site].length) {
+    storyPointsFieldIdsBySite.set(site, storyPointsFieldsBySite[site]);
+    return storyPointsFieldsBySite[site];
   }
-  return storyPointsFieldId;
+
+  const fields = await jiraFetch('/field');
+  const ids = findStoryPointsFieldIds(fields);
+  storyPointsFieldIdsBySite.set(site, ids);
+  if (ids.length) {
+    await chrome.storage.local.set({ storyPointsFieldsBySite: { ...storyPointsFieldsBySite, [site]: ids } });
+  }
+  return ids;
+}
+
+async function optionalStoryPointsFieldIds() {
+  try {
+    return await getStoryPointsFieldIds();
+  } catch (error) {
+    // Story Points enrich the calendar but are not required to read, create or
+    // validate worklogs. Continue without them and retry discovery later.
+    console.warn('Could not load the optional Jira Story Points field:', error);
+    return [];
+  }
 }
 
 async function issueDetails(issueKey) {
-  const storyPointsFieldId = await getStoryPointsFieldId();
-  const wanted = ['timespent', 'timeoriginalestimate', 'timeestimate', ...(storyPointsFieldId ? [storyPointsFieldId] : [])];
+  const storyPointsFieldIds = await optionalStoryPointsFieldIds();
+  const wanted = ['timespent', 'timeoriginalestimate', 'timeestimate', ...storyPointsFieldIds];
   const issue = await jiraFetch(`/issue/${encodeURIComponent(issueKey)}?fields=${wanted.join(',')}`);
   return {
     key: issueKey,
     loggedSeconds: issue.fields?.timespent || 0,
-    storyPoints: storyPointsFieldId ? issue.fields?.[storyPointsFieldId] ?? null : null,
+    storyPoints: storyPointsFieldIds.map((fieldId) => issue.fields?.[fieldId]).find((value) => value !== null && value !== undefined) ?? null,
     originalEstimateSeconds: issue.fields?.timeoriginalestimate ?? null,
     remainingEstimateSeconds: issue.fields?.timeestimate ?? null,
   };
@@ -514,6 +653,16 @@ async function handleApi(path, options = {}) {
   const url = new URL(path, 'https://extension.local');
   const body = options.body ? JSON.parse(options.body) : {};
   const state = await stored();
+  if (url.pathname === '/api/errors' && (!options.method || options.method === 'GET')) return state.extensionErrors;
+  if (url.pathname === '/api/errors' && options.method === 'DELETE') {
+    await chrome.storage.local.set({ extensionErrors: [] });
+    return { ok: true };
+  }
+  if (url.pathname === '/api/errors' && options.method === 'POST') {
+    await recordExtensionError({ message: body.message, stack: body.stack }, body.context || 'Calendar');
+    return { ok: true };
+  }
+  if (url.pathname === '/api/auto-log/status') return state.autoLogStatus;
   if (url.pathname === '/api/config/status') return { configured: Boolean(state.config.site && state.config.email && state.config.apiToken), site: state.config.site || null, email: state.config.email || null };
   if (url.pathname === '/api/config' && options.method === 'POST') {
     const candidate = { site: cleanSite(body.site), email: String(body.email || '').trim(), apiToken: String(body.apiToken || '').trim() };
@@ -521,11 +670,13 @@ async function handleApi(path, options = {}) {
     validateSite(candidate.site);
     const previous = state.config;
     await chrome.storage.local.set({ config: candidate, me: null });
+    jiraStatusesPromise = null;
     try { return { ok: true, user: await resolveMe() }; }
     catch (error) { await chrome.storage.local.set({ config: previous, me: state.me }); throw error; }
   }
   if (url.pathname === '/api/config' && options.method === 'DELETE') {
     await chrome.storage.local.set({ config: { ...DEFAULTS.config }, me: null });
+    jiraStatusesPromise = null;
     return { ok: true };
   }
   // Always validate the saved token when a popup/calendar session starts.
@@ -535,7 +686,20 @@ async function handleApi(path, options = {}) {
   if (url.pathname === '/api/settings' && (!options.method || options.method === 'GET')) return state.settings;
   if (url.pathname === '/api/settings' && options.method === 'POST') {
     const settings = await updateSettings(body);
+    if (body.autoLogEnabled === true) await scheduleAutoLogAlarm(true);
     return { ok: true, ...settings };
+  }
+  if (url.pathname === '/api/status-filters') {
+    if (url.searchParams.get('refresh') === 'true') jiraStatusesPromise = null;
+    const statuses = await getJiraStatuses();
+    const autoLogStatusIds = effectiveStatusIds(state.settings.autoLogStatusIds, statuses, 'autoLog');
+    const taskListStatusIds = effectiveStatusIds(state.settings.taskListStatusIds, statuses, 'taskList');
+    const relevantIds = state.me?.accountId ? await assignedActiveStatusIds(state.me.accountId) : [];
+    return {
+      statuses: relevantWorkflowStatuses(statuses, relevantIds, [...autoLogStatusIds, ...taskListStatusIds]),
+      autoLogStatusIds,
+      taskListStatusIds,
+    };
   }
   if (url.pathname === '/api/holidays') {
     const country = state.settings.holidayCountry;
@@ -561,6 +725,7 @@ async function handleApi(path, options = {}) {
   }
   const worklogMatch = url.pathname.match(/^\/api\/worklogs\/([^/]+)\/([^/]+)$/);
   if (worklogMatch && options.method === 'PUT') {
+    await revalidateJiraConnection();
     await ownAccount(body.accountId);
     const [, issueKey, worklogId] = worklogMatch;
     await assertWorklogOwned(issueKey, worklogId);
@@ -568,6 +733,7 @@ async function handleApi(path, options = {}) {
     return { ok: true };
   }
   if (worklogMatch && options.method === 'DELETE') {
+    await revalidateJiraConnection();
     await ownAccount(url.searchParams.get('accountId'));
     await assertWorklogOwned(worklogMatch[1], worklogMatch[2]);
     await jiraFetch(`/issue/${encodeURIComponent(worklogMatch[1])}/worklog/${encodeURIComponent(worklogMatch[2])}?adjustEstimate=leave`, { method: 'DELETE' });
@@ -581,7 +747,8 @@ async function handleApi(path, options = {}) {
     const q = (url.searchParams.get('q') || '').trim();
     if (q.length < 2) return [];
     const accountId = await readableAccount(url.searchParams.get('accountId'));
-    return searchIssues(accountId, url.searchParams.get('date'), q);
+    const projectKeys = (url.searchParams.get('projectKeys') || '').split(',').filter(Boolean);
+    return searchIssues(accountId, url.searchParams.get('date'), q, projectKeys);
   }
   const detailMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/details$/);
   if (detailMatch) return issueDetails(decodeURIComponent(detailMatch[1]));
@@ -592,8 +759,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'api') return false;
   handleApi(message.path, message.options || {})
     .then((data) => sendResponse({ ok: true, data }))
-    .catch((error) => sendResponse({ ok: false, error: error.message, code: error.code, site: error.site }));
+    .catch(async (error) => {
+      await recordExtensionError(error, apiErrorContext(message.path, message.options));
+      sendResponse({ ok: false, error: error.message, code: error.code, site: error.site });
+    });
   return true;
+});
+
+self.addEventListener('error', (event) => {
+  void recordExtensionError(event.error || event.message, 'Service worker');
+});
+self.addEventListener('unhandledrejection', (event) => {
+  void recordExtensionError(event.reason, 'Service worker promise');
 });
 
 async function reviewTransitionMinute(issue, date, timeZone) {
@@ -623,34 +800,70 @@ async function runAutoLog() {
   const state = await stored();
   const date = todayStr();
   const now = new Date();
-  if (!state.settings.autoLogEnabled || !state.me || state.settings.lastAutoLogDate === date || now.getHours() < 18 || [0, 6].includes(now.getDay())) return;
-  if ((state.oofByAccount[state.me.accountId] || []).includes(date) || (state.vacationByAccount[state.me.accountId] || []).includes(date)) return;
-  if (await excludedHolidayForDate(date)) return;
+  const skip = (message) => setAutoLogStatus('skipped', message, { date });
+  await setAutoLogStatus('checking', 'Checking whether auto-log should run.', { date });
+  if (!state.settings.autoLogEnabled) return skip('Auto-log is disabled.');
+  if (!state.me) return skip('No authenticated Jira user is available.');
+  if (state.settings.lastAutoLogDate === date) return skip('Auto-log has already completed today.');
+  if (now.getHours() < AUTO_LOG_HOUR) return skip(`Waiting until ${AUTO_LOG_HOUR}:00.`);
+  if ([0, 6].includes(now.getDay())) return skip('Skipped because today is a weekend.');
+  if ((state.oofByAccount[state.me.accountId] || []).includes(date)) return skip('Skipped because today is marked OOF.');
+  if ((state.vacationByAccount[state.me.accountId] || []).includes(date)) return skip('Skipped because today is marked as Vacation.');
+  if (await excludedHolidayForDate(date)) return skip('Skipped because today is an excluded holiday.');
   const existing = await getWorklogs(state.me.accountId, date, date);
-  if ((existing.byDate[date] || []).length) return;
+  if ((existing.byDate[date] || []).length) return skip('Skipped because today already has one or more worklogs.');
   const inProgress = await inProgressIssues(state.me.accountId, date);
   const plan = await autoPlan(inProgress, state.settings.expectedHours, date, effectiveTimeZone(state.me?.timeZone), state.settings.morningStart);
+  if (!plan.length) return skip('No tasks matched the configured auto-worklog statuses for today.');
   for (const item of plan) {
     // The user may disable auto-log while Jira queries are still in flight.
     // Re-check immediately before every external write.
     const latest = await stored();
-    if (!latest.settings.autoLogEnabled) return;
+    if (!latest.settings.autoLogEnabled) return skip('Stopped because auto-log was disabled while running.');
     await createWorklog(item.issueKey, date, item.time, item.seconds, AUTO_LOG_COMMENT);
   }
-  if (plan.length) await updateSettings({ lastAutoLogDate: date });
+  await updateSettings({ lastAutoLogDate: date });
+  return setAutoLogStatus('success', `Created ${plan.length} automatic worklog${plan.length === 1 ? '' : 's'}.`, { date, worklogCount: plan.length });
 }
 
-chrome.runtime.onInstalled.addListener(() => chrome.alarms.create('auto-log-check', { periodInMinutes: 15 }));
-chrome.runtime.onStartup.addListener(() => chrome.alarms.create('auto-log-check', { periodInMinutes: 15 }));
+function nextAutoLogTime(recoverToday) {
+  return nextDailyRunTime(new Date(), AUTO_LOG_HOUR, recoverToday);
+}
+
+async function scheduleAutoLogAlarm(recoverToday = false) {
+  await chrome.alarms.create(AUTO_LOG_ALARM, { when: nextAutoLogTime(recoverToday) });
+}
+
+async function ensureAutoLogAlarm() {
+  const alarm = await chrome.alarms.get(AUTO_LOG_ALARM);
+  // Replace the legacy 15-minute periodic alarm with a fixed local 18:00
+  // one-shot alarm. One-shot scheduling is recalculated daily so DST changes
+  // do not shift the execution hour.
+  if (!alarm || alarm.periodInMinutes) await scheduleAutoLogAlarm(true);
+}
+
+chrome.runtime.onInstalled.addListener(() => { void scheduleAutoLogAlarm(true); });
+chrome.runtime.onStartup.addListener(() => { void scheduleAutoLogAlarm(true); });
 let autoLogRunning = false;
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== 'auto-log-check' || autoLogRunning) return;
+  if (alarm.name !== AUTO_LOG_ALARM || autoLogRunning) return;
   autoLogRunning = true;
+  let retry = false;
   try {
     await runAutoLog();
   } catch (error) {
+    retry = true;
+    const message = error?.code === 'JIRA_NETWORK_ERROR'
+      ? 'Could not reach Jira. Retry scheduled in 15 minutes.'
+      : error?.message || 'Auto-log failed.';
+    await setAutoLogStatus('error', message, { date: todayStr(), retryAt: new Date(Date.now() + 15 * 60 * 1000).toISOString() });
+    await recordExtensionError(error, 'Auto-log alarm');
     console.error(error);
   } finally {
     autoLogRunning = false;
+    if (retry) await chrome.alarms.create(AUTO_LOG_ALARM, { when: Date.now() + 15 * 60 * 1000 });
+    else await scheduleAutoLogAlarm(false);
   }
 });
+
+void ensureAutoLogAlarm();

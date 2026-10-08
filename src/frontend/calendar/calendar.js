@@ -26,6 +26,31 @@ const state = {
 };
 
 const OOF_STORAGE_KEY = 'logwork_oof_v1';
+const SETTINGS_SECTION_STATE_KEY = 'settingsSectionState';
+const OPEN_ISSUES_CACHE_TTL_MS = 60 * 1000;
+
+async function initializeSettingsSections() {
+  const sections = Array.from(document.querySelectorAll('[data-settings-section]'));
+  try {
+    const storedState = (await chrome.storage.local.get(SETTINGS_SECTION_STATE_KEY))[SETTINGS_SECTION_STATE_KEY] || {};
+    sections.forEach((section) => {
+      const key = section.dataset.settingsSection;
+      if (typeof storedState[key] === 'boolean') section.open = storedState[key];
+    });
+  } catch (error) {
+    console.error('Could not restore settings section state:', error);
+  }
+  sections.forEach((section) => {
+    section.addEventListener('toggle', async () => {
+      try {
+        const current = Object.fromEntries(sections.map((item) => [item.dataset.settingsSection, item.open]));
+        await chrome.storage.local.set({ [SETTINGS_SECTION_STATE_KEY]: current });
+      } catch (error) {
+        console.error('Could not save settings section state:', error);
+      }
+    });
+  });
+}
 
 async function loadOofDates(accountId) {
   const { oofByAccount = {} } = await chrome.storage.local.get('oofByAccount');
@@ -157,10 +182,19 @@ const els = {
   manualHolidayList: document.getElementById('manualHolidayList'),
   autoLogInput: document.getElementById('autoLogInput'),
   autoLogInfoIcon: document.getElementById('autoLogInfoIcon'),
+  autoLogStatus: document.getElementById('autoLogStatus'),
+  autoLogStatusFilters: document.getElementById('autoLogStatusFilters'),
+  taskListStatusFilters: document.getElementById('taskListStatusFilters'),
+  statusFilterMessage: document.getElementById('statusFilterMessage'),
+  syncStatusFiltersBtn: document.getElementById('syncStatusFiltersBtn'),
+  resetStatusFiltersBtn: document.getElementById('resetStatusFiltersBtn'),
   manageCredentialsBtn: document.getElementById('manageCredentialsBtn'),
   exportDataBtn: document.getElementById('exportDataBtn'),
   importDataBtn: document.getElementById('importDataBtn'),
   importDataInput: document.getElementById('importDataInput'),
+  diagnosticsList: document.getElementById('diagnosticsList'),
+  copyDiagnosticsBtn: document.getElementById('copyDiagnosticsBtn'),
+  clearDiagnosticsBtn: document.getElementById('clearDiagnosticsBtn'),
   statusBar: document.getElementById('statusBar'),
   calendarWeekdays: document.getElementById('calendarWeekdays'),
   calendarGrid: document.getElementById('calendarGrid'),
@@ -273,16 +307,19 @@ function setStatus(msg, isError) {
 }
 
 function setApiError(error, prefix = '') {
-  if (error.code !== 'JIRA_AUTH_REQUIRED' || !error.site) {
+  if (error.code !== 'JIRA_AUTH_REQUIRED') {
     setStatus(`${prefix}${error.message}`, true);
     return;
   }
-  const link = document.createElement('a');
-  link.href = `https://${error.site}`;
-  link.target = '_blank';
-  link.rel = 'noopener';
-  link.textContent = 'Open Jira login';
-  els.statusBar.replaceChildren(document.createTextNode(`${prefix}${error.message} `), link);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'status-action';
+  button.textContent = 'Update API credentials';
+  button.addEventListener('click', () => { void manageCredentials(); });
+  els.statusBar.replaceChildren(
+    document.createTextNode(`${prefix}${error.message} The Jira browser login is not used. `),
+    button,
+  );
   els.statusBar.classList.remove('hidden');
   els.statusBar.classList.add('error');
 }
@@ -390,7 +427,7 @@ function openSetupDialog({ required = false } = {}) {
   });
 }
 
-els.manageCredentialsBtn.addEventListener('click', async () => {
+async function manageCredentials() {
   const config = await api('/api/config/status');
   els.setupSite.value = config.site || '';
   els.setupEmail.value = config.email || '';
@@ -398,7 +435,9 @@ els.manageCredentialsBtn.addEventListener('click', async () => {
   els.setupError.classList.add('hidden');
   const changed = await openSetupDialog();
   if (changed) location.reload();
-});
+}
+
+els.manageCredentialsBtn.addEventListener('click', () => { void manageCredentials(); });
 
 els.deleteCredentialsBtn.addEventListener('click', async () => {
   if (!confirm('Remove the saved Jira credentials from this Chrome profile?')) return;
@@ -532,10 +571,15 @@ async function selectCalendarDay(dateStr, event) {
     dayCell.classList.toggle('selected', state.selectedDates.has(dayCell.dataset.date));
   });
   renderBulkPanel();
-  const selectedWeekByDate = await resolveSelectedWeekData();
-  if (state.selectedDate !== dateStr) return;
-  state.selectedWeekByDate = selectedWeekByDate;
-  renderSummary();
+  try {
+    const selectedWeekByDate = await resolveSelectedWeekData();
+    if (state.selectedDate !== dateStr) return;
+    state.selectedWeekByDate = selectedWeekByDate;
+    renderSummary();
+  } catch (_) {
+    // fetchWorklogRange already displays the Jira error. Keep the previously
+    // loaded summary instead of replacing it with an empty week.
+  }
 }
 
 function wireCalendarDayInteractions(selector) {
@@ -766,8 +810,12 @@ async function openDayDialog(dateStr) {
   if (state.selectedDate !== dateStr) {
     state.selectedDate = dateStr;
     renderGrid();
-    state.selectedWeekByDate = await resolveSelectedWeekData();
-    renderSummary();
+    try {
+      state.selectedWeekByDate = await resolveSelectedWeekData();
+      renderSummary();
+    } catch (_) {
+      // Preserve the last successful summary while the Jira error is visible.
+    }
   }
 }
 
@@ -1209,15 +1257,14 @@ async function deleteEntry(row, dateStr) {
   }
 }
 
-async function loadOpenIssuesForDate(dateStr) {
-  if (state.openIssuesCache.has(dateStr)) return state.openIssuesCache.get(dateStr);
-  let issues = [];
-  try {
-    issues = await api(`/api/issues/open?accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`);
-  } catch (err) {
-    console.error(err);
-  }
-  state.openIssuesCache.set(dateStr, issues);
+async function loadOpenIssuesForDate(dateStr, force = false) {
+  const cached = state.openIssuesCache.get(dateStr);
+  if (!force && cached && Date.now() - cached.fetchedAt < OPEN_ISSUES_CACHE_TTL_MS) return cached.issues;
+  const issues = await api(`/api/issues/open?accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`);
+  // Never cache request failures as an empty result. A short-lived successful
+  // cache keeps repeated dialog openings fast while still reflecting Jira
+  // status and assignment changes without requiring a page refresh.
+  state.openIssuesCache.set(dateStr, { issues, fetchedAt: Date.now() });
   return issues;
 }
 
@@ -1287,13 +1334,15 @@ function wireAddEntryForm(dateStr) {
 
     function renderIssueOptions(openIssues, searchResults) {
       const parts = [];
+      const openKeys = new Set(openIssues.map((issue) => issue.key));
+      const uniqueSearchResults = (searchResults || []).filter((issue) => !openKeys.has(issue.key));
       if (openIssues.length) {
         parts.push(`<div class="group-label">${openGroupLabel}</div>`);
         parts.push(openIssues.map(issueOptionHtml).join(''));
       }
-      if (searchResults && searchResults.length) {
+      if (uniqueSearchResults.length) {
         parts.push('<div class="group-label">Search results</div>');
-        parts.push(searchResults.map(issueOptionHtml).join(''));
+        parts.push(uniqueSearchResults.map(issueOptionHtml).join(''));
       }
       if (!parts.length) {
         suggestionsEl.classList.add('hidden');
@@ -1337,6 +1386,61 @@ function wireAddEntryForm(dateStr) {
 
     let openIssues = [];
     let openIssuesLoaded = false;
+    let openIssuesError = null;
+    let openIssuesRequest = null;
+    const shouldShowOpenIssues = () => document.activeElement === issueInput && issueInput.value.trim().length < 2;
+    const knownProjectKeys = () => {
+      const keys = new Set(openIssues.map((issue) => issue.projectKey).filter(Boolean));
+      for (const map of [state.byDate, state.monthByDate, state.selectedWeekByDate]) {
+        for (const entries of Object.values(map)) {
+          for (const entry of entries) {
+            const key = entry.projectKey || String(entry.issueKey || '').match(/^([A-Za-z][A-Za-z0-9_]*)-/)?.[1];
+            if (key) keys.add(key);
+          }
+        }
+      }
+      return [...keys];
+    };
+
+    function renderIssueLoading() {
+      suggestionsEl.innerHTML = '<div class="group-label">Loading…</div>';
+      suggestionsEl.classList.remove('hidden');
+    }
+
+    function renderIssueLoadError(error) {
+      const message = document.createElement('div');
+      message.className = 'issue-load-error';
+      message.textContent = error?.message || 'Could not load Jira tasks.';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'issue-load-retry';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => { void refreshOpenIssues(true); });
+      suggestionsEl.replaceChildren(message, retry);
+      suggestionsEl.classList.remove('hidden');
+    }
+
+    async function refreshOpenIssues(force = false) {
+      if (openIssuesRequest) return openIssuesRequest;
+      openIssuesError = null;
+      if (shouldShowOpenIssues()) renderIssueLoading();
+      openIssuesRequest = loadOpenIssuesForDate(dateStr, force);
+      try {
+        openIssues = await openIssuesRequest;
+        openIssuesLoaded = true;
+        if (shouldShowOpenIssues()) renderIssueOptions(openIssues, null);
+        else if (document.activeElement === issueInput && issueInput.value.trim().length >= 2) {
+          issueInput.dispatchEvent(new Event('input'));
+        }
+      } catch (error) {
+        openIssuesLoaded = false;
+        openIssuesError = error;
+        console.error(error);
+        if (shouldShowOpenIssues()) renderIssueLoadError(error);
+      } finally {
+        openIssuesRequest = null;
+      }
+    }
 
     // Wire listeners synchronously (no await before this point) so a fast
     // click-then-focus from the user is never missed while the fetch below
@@ -1344,8 +1448,9 @@ function wireAddEntryForm(dateStr) {
     // invisible until an unrelated click forced a re-render.
     issueInput.addEventListener('focus', () => {
       if (!openIssuesLoaded) {
-        suggestionsEl.innerHTML = '<div class="group-label">Loading…</div>';
-        suggestionsEl.classList.remove('hidden');
+        if (openIssuesError) renderIssueLoadError(openIssuesError);
+        else renderIssueLoading();
+        if (!openIssuesRequest) void refreshOpenIssues(Boolean(openIssuesError));
         return;
       }
       renderIssueOptions(openIssues, null);
@@ -1355,12 +1460,15 @@ function wireAddEntryForm(dateStr) {
       clearTimeout(searchDebounce2);
       const q = issueInput.value.trim();
       if (q.length < 2) {
-        renderIssueOptions(openIssues, null);
+        if (openIssuesError) renderIssueLoadError(openIssuesError);
+        else if (openIssuesRequest) renderIssueLoading();
+        else renderIssueOptions(openIssues, null);
         return;
       }
       searchDebounce2 = setTimeout(async () => {
         try {
-          const results = await api(`/api/issues/search?q=${encodeURIComponent(q)}&accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`);
+          const projectKeys = knownProjectKeys().join(',');
+          const results = await api(`/api/issues/search?q=${encodeURIComponent(q)}&accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}&projectKeys=${encodeURIComponent(projectKeys)}`);
           renderIssueOptions(openIssues, results);
         } catch (err) {
           console.error(err);
@@ -1368,11 +1476,7 @@ function wireAddEntryForm(dateStr) {
       }, 250);
     });
 
-    loadOpenIssuesForDate(dateStr).then((issues) => {
-      openIssues = issues;
-      openIssuesLoaded = true;
-      if (document.activeElement === issueInput) renderIssueOptions(openIssues, null);
-    });
+    void refreshOpenIssues();
 
     document.getElementById('cancelAddEntry').addEventListener('click', () => renderDayDialogBody(dateStr));
     document.getElementById('saveAddEntry').addEventListener('click', async () => {
@@ -1591,13 +1695,18 @@ async function resolveSelectedWeekData() {
 
 async function fetchWorklogRange(rangeStart, rangeEnd) {
   try {
+    const start = fmtDate(rangeStart);
+    const end = fmtDate(rangeEnd);
     const data = await api(
-      `/api/worklogs?accountId=${encodeURIComponent(state.user.accountId)}&start=${fmtDate(rangeStart)}&end=${fmtDate(rangeEnd)}`
+      `/api/worklogs?accountId=${encodeURIComponent(state.user.accountId)}&start=${start}&end=${end}`
     );
-    return mergePendingOptimisticEntries(data.byDate || {}, fmtDate(rangeStart), fmtDate(rangeEnd));
+    return mergePendingOptimisticEntries(data.byDate || {}, start, end);
   } catch (err) {
     setApiError(err, 'Error loading worklogs: ');
-    return {};
+    // A failed request must not look like a successful empty period: callers
+    // retain their last successful data and can retry without losing the
+    // worklogs already visible in another view.
+    throw err;
   }
 }
 
@@ -1631,18 +1740,40 @@ async function refresh() {
 
   const { dataStart, dataEnd } = getRange();
   setStatus('Loading worklogs from Jira…');
-  const [byDate] = await Promise.all([fetchWorklogRange(dataStart, dataEnd), loadHolidaysForRange(dataStart, dataEnd)]);
+  let byDate;
+  try {
+    [byDate] = await Promise.all([fetchWorklogRange(dataStart, dataEnd), loadHolidaysForRange(dataStart, dataEnd)]);
+  } catch (_) {
+    if (token !== state.refreshToken) return;
+    els.calendarGrid.classList.remove('is-loading');
+    renderGrid();
+    renderSummary();
+    renderBulkPanel();
+    return;
+  }
   if (token !== state.refreshToken) return;
   state.byDate = byDate;
   setStatus('');
 
   const monthStart = new Date(state.anchor.getFullYear(), state.anchor.getMonth(), 1);
   const monthEnd = new Date(state.anchor.getFullYear(), state.anchor.getMonth() + 1, 0);
-  const monthByDate = state.view === 'month' ? state.byDate : await fetchWorklogRange(monthStart, monthEnd);
+  let monthByDate = state.byDate;
+  if (state.view !== 'month') {
+    try {
+      monthByDate = await fetchWorklogRange(monthStart, monthEnd);
+    } catch (_) {
+      monthByDate = state.monthByDate;
+    }
+  }
   if (token !== state.refreshToken) return;
   state.monthByDate = monthByDate;
 
-  const selectedWeekByDate = await resolveSelectedWeekData();
+  let selectedWeekByDate = state.selectedWeekByDate;
+  try {
+    selectedWeekByDate = await resolveSelectedWeekData();
+  } catch (_) {
+    // Keep the last successful selected-week data and the visible API error.
+  }
   if (token !== state.refreshToken) return;
   state.selectedWeekByDate = selectedWeekByDate;
 
@@ -1694,7 +1825,13 @@ els.showWeekendsInput.addEventListener('change', () => {
 });
 
 els.prevBtn.addEventListener('click', () => {
-  if (state.view === 'week') state.anchor.setDate(state.anchor.getDate() - 7);
+  if (state.view === 'week') {
+    const selected = new Date(`${state.selectedDate || fmtDate(state.anchor)}T12:00:00`);
+    state.anchor.setDate(state.anchor.getDate() - 7);
+    selected.setDate(selected.getDate() - 7);
+    state.selectedDate = fmtDate(selected);
+    state.selectedDates = new Set([state.selectedDate]);
+  }
   else if (state.view === 'year') {
     state.anchor.setFullYear(state.anchor.getFullYear() - 1);
     state.selectedDate = fmtDate(state.anchor);
@@ -1714,7 +1851,13 @@ els.prevBtn.addEventListener('click', () => {
 });
 
 els.nextBtn.addEventListener('click', () => {
-  if (state.view === 'week') state.anchor.setDate(state.anchor.getDate() + 7);
+  if (state.view === 'week') {
+    const selected = new Date(`${state.selectedDate || fmtDate(state.anchor)}T12:00:00`);
+    state.anchor.setDate(state.anchor.getDate() + 7);
+    selected.setDate(selected.getDate() + 7);
+    state.selectedDate = fmtDate(selected);
+    state.selectedDates = new Set([state.selectedDate]);
+  }
   else if (state.view === 'year') {
     state.anchor.setFullYear(state.anchor.getFullYear() + 1);
     state.selectedDate = fmtDate(state.anchor);
@@ -1779,9 +1922,115 @@ els.autoLogInput.addEventListener('change', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ autoLogEnabled: els.autoLogInput.checked }),
     });
+    renderAutoLogStatus({
+      checkedAt: new Date().toISOString(),
+      outcome: 'checking',
+      message: els.autoLogInput.checked ? 'Auto-log scheduled.' : 'Auto-log disabled.',
+    });
+    setTimeout(() => { void loadAutoLogStatus(); }, 1500);
   } catch (err) {
     els.autoLogInput.checked = !els.autoLogInput.checked; // revert on failure
     setStatus(`Could not update auto-log setting: ${err.message}`, true);
+  }
+});
+
+function renderStatusFilterOptions(container, statuses, selectedIds) {
+  const selected = new Set(selectedIds.map(String));
+  if (!statuses.length) {
+    container.replaceChildren(Object.assign(document.createElement('span'), {
+      className: 'status-filter-empty',
+      textContent: 'No active Jira statuses found.',
+    }));
+    return;
+  }
+  container.replaceChildren(...statuses.map((status) => {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    const statusIds = (status.ids || [status.id]).map(String);
+    input.value = String(status.id);
+    input.dataset.statusIds = statusIds.join(',');
+    input.checked = statusIds.some((id) => selected.has(id));
+    const label = document.createElement('label');
+    label.className = 'status-filter-option';
+    label.append(input, document.createTextNode(status.name));
+    return label;
+  }));
+}
+
+function selectedStatusIds(container) {
+  return [...new Set([...container.querySelectorAll('input[type="checkbox"]:checked')]
+    .flatMap((input) => (input.dataset.statusIds || input.value).split(',').filter(Boolean)))];
+}
+
+async function loadStatusFilters({ refresh = false } = {}) {
+  try {
+    const data = await api(`/api/status-filters${refresh ? '?refresh=true' : ''}`);
+    renderStatusFilterOptions(els.autoLogStatusFilters, data.statuses || [], data.autoLogStatusIds || []);
+    renderStatusFilterOptions(els.taskListStatusFilters, data.statuses || [], data.taskListStatusIds || []);
+    els.statusFilterMessage.textContent = '';
+    els.statusFilterMessage.classList.remove('error');
+  } catch (error) {
+    els.statusFilterMessage.textContent = /Unknown API route:\s*\/api\/status-filters/i.test(error.message)
+      ? 'The extension update is incomplete. Reload JiraLogWork in chrome://extensions, then reopen the calendar.'
+      : `Could not load Jira statuses: ${error.message}`;
+    els.statusFilterMessage.classList.add('error');
+  }
+}
+
+async function saveStatusFilters() {
+  const inputs = [...els.autoLogStatusFilters.querySelectorAll('input'), ...els.taskListStatusFilters.querySelectorAll('input')];
+  inputs.forEach((input) => { input.disabled = true; });
+  els.statusFilterMessage.textContent = 'Saving…';
+  els.statusFilterMessage.classList.remove('error');
+  try {
+    await api('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        autoLogStatusIds: selectedStatusIds(els.autoLogStatusFilters),
+        taskListStatusIds: selectedStatusIds(els.taskListStatusFilters),
+      }),
+    });
+    state.openIssuesCache.clear();
+    els.statusFilterMessage.textContent = 'Saved.';
+  } catch (error) {
+    els.statusFilterMessage.textContent = `Could not save filters: ${error.message}`;
+    els.statusFilterMessage.classList.add('error');
+    await loadStatusFilters();
+  } finally {
+    inputs.forEach((input) => { input.disabled = false; });
+  }
+}
+
+els.autoLogStatusFilters.addEventListener('change', () => { void saveStatusFilters(); });
+els.taskListStatusFilters.addEventListener('change', () => { void saveStatusFilters(); });
+els.syncStatusFiltersBtn.addEventListener('click', async () => {
+  els.syncStatusFiltersBtn.disabled = true;
+  els.statusFilterMessage.textContent = 'Synchronizing…';
+  els.statusFilterMessage.classList.remove('error');
+  try {
+    await loadStatusFilters({ refresh: true });
+    if (!els.statusFilterMessage.classList.contains('error')) els.statusFilterMessage.textContent = 'Statuses synchronized.';
+  } finally {
+    els.syncStatusFiltersBtn.disabled = false;
+  }
+});
+els.resetStatusFiltersBtn.addEventListener('click', async () => {
+  els.resetStatusFiltersBtn.disabled = true;
+  try {
+    await api('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoLogStatusIds: null, taskListStatusIds: null }),
+    });
+    state.openIssuesCache.clear();
+    await loadStatusFilters();
+    els.statusFilterMessage.textContent = 'Defaults restored.';
+  } catch (error) {
+    els.statusFilterMessage.textContent = `Could not reset filters: ${error.message}`;
+    els.statusFilterMessage.classList.add('error');
+  } finally {
+    els.resetStatusFiltersBtn.disabled = false;
   }
 });
 
@@ -1789,6 +2038,10 @@ function setSettingsPanelOpen(open) {
   els.settingsPanel.classList.toggle('open', open);
   els.settingsPanel.setAttribute('aria-hidden', String(!open));
   els.settingsBackdrop.classList.toggle('hidden', !open);
+  if (open) {
+    void loadDiagnostics();
+    void loadAutoLogStatus();
+  }
 }
 
 els.settingsBtn.addEventListener('click', () => setSettingsPanelOpen(true));
@@ -1797,6 +2050,128 @@ els.settingsBackdrop.addEventListener('click', () => setSettingsPanelOpen(false)
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && els.settingsPanel.classList.contains('open')) setSettingsPanelOpen(false);
 });
+
+let displayedDiagnostics = [];
+let displayedAutoLogStatus = null;
+
+function renderAutoLogStatus(status) {
+  displayedAutoLogStatus = status || null;
+  const label = els.autoLogStatus.querySelector('.auto-log-status-label');
+  const message = els.autoLogStatus.querySelector('.auto-log-status-message');
+  els.autoLogStatus.className = `auto-log-status ${status?.outcome || 'idle'}`;
+  label.textContent = status?.checkedAt ? `Auto worklog · Last check ${diagnosticTimeLabel(status.checkedAt)}` : 'Auto worklog · Last check';
+  message.textContent = status?.message || 'No checks recorded.';
+}
+
+async function loadAutoLogStatus() {
+  try {
+    renderAutoLogStatus(await api('/api/auto-log/status'));
+  } catch (error) {
+    console.error('Could not load auto-log status:', error);
+  }
+}
+
+function diagnosticTimeLabel(timestamp) {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? String(timestamp || '') : date.toLocaleString();
+}
+
+function renderDiagnostics(errors) {
+  displayedDiagnostics = Array.isArray(errors) ? errors.slice().reverse() : [];
+  els.copyDiagnosticsBtn.disabled = false;
+  els.clearDiagnosticsBtn.disabled = displayedDiagnostics.length === 0;
+  if (!displayedDiagnostics.length) {
+    const empty = document.createElement('p');
+    empty.className = 'diagnostics-empty';
+    empty.textContent = 'No recorded errors.';
+    els.diagnosticsList.replaceChildren(empty);
+    return;
+  }
+  const rows = displayedDiagnostics.map((entry) => {
+    const article = document.createElement('article');
+    article.className = 'diagnostic-entry';
+    const meta = document.createElement('div');
+    meta.className = 'diagnostic-meta';
+    const context = document.createElement('strong');
+    context.textContent = entry.context || 'Extension';
+    const time = document.createElement('time');
+    time.dateTime = entry.timestamp || '';
+    time.textContent = diagnosticTimeLabel(entry.timestamp);
+    meta.append(context, time);
+    const message = document.createElement('p');
+    message.textContent = entry.message || 'Unknown error';
+    article.append(meta, message);
+    if (entry.stack) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Technical details';
+      const stack = document.createElement('pre');
+      stack.textContent = entry.stack;
+      details.append(summary, stack);
+      article.append(details);
+    }
+    return article;
+  });
+  els.diagnosticsList.replaceChildren(...rows);
+}
+
+async function loadDiagnostics() {
+  try {
+    renderDiagnostics(await api('/api/errors'));
+  } catch (error) {
+    console.error('Could not load diagnostics:', error);
+  }
+}
+
+els.clearDiagnosticsBtn.addEventListener('click', async () => {
+  els.clearDiagnosticsBtn.disabled = true;
+  try {
+    await api('/api/errors', { method: 'DELETE' });
+    renderDiagnostics([]);
+  } catch (error) {
+    setApiError(error, 'Could not clear diagnostics: ');
+    els.clearDiagnosticsBtn.disabled = false;
+  }
+});
+
+els.copyDiagnosticsBtn.addEventListener('click', async () => {
+  const version = chrome.runtime.getManifest().version;
+  const report = [
+    `JiraLogWork ${version}`,
+    `Generated: ${new Date().toISOString()}`,
+    `Browser: ${navigator.userAgent}`,
+    '',
+    'Auto worklog scheduler',
+    displayedAutoLogStatus?.checkedAt ? `Last check: ${displayedAutoLogStatus.checkedAt}` : 'Last check: Not recorded',
+    `Status: ${displayedAutoLogStatus?.outcome || 'unknown'}`,
+    displayedAutoLogStatus?.message || 'No checks recorded.',
+    '',
+    ...displayedDiagnostics.map((entry, index) => [
+      `#${index + 1} ${entry.timestamp || ''} · ${entry.context || 'Extension'}`,
+      entry.message || 'Unknown error',
+      entry.stack || '',
+    ].filter(Boolean).join('\n')),
+  ].join('\n\n');
+  try {
+    await navigator.clipboard.writeText(report);
+    const original = els.copyDiagnosticsBtn.textContent;
+    els.copyDiagnosticsBtn.textContent = 'Copied';
+    setTimeout(() => { els.copyDiagnosticsBtn.textContent = original; }, 1200);
+  } catch (error) {
+    setApiError(error, 'Could not copy diagnostics: ');
+  }
+});
+
+function reportCalendarError(error, context) {
+  const source = error instanceof Error ? error : new Error(String(error || 'Unknown error'));
+  api('/api/errors', {
+    method: 'POST',
+    body: JSON.stringify({ context, message: source.message, stack: source.stack || '' }),
+  }).catch(() => {});
+}
+
+window.addEventListener('error', (event) => reportCalendarError(event.error || event.message, 'Calendar'));
+window.addEventListener('unhandledrejection', (event) => reportCalendarError(event.reason, 'Calendar promise'));
 
 async function saveWorkingPeriods() {
   const previousMorning = state.morningStart;
@@ -1910,7 +2285,7 @@ els.exportDataBtn.addEventListener('click', async () => {
   }));
   const payload = {
     format: 'jiralogwork-export',
-    version: 5,
+    version: 6,
     exportedAt: new Date().toISOString(),
     oof,
     vacations: vacationsByYear,
@@ -1922,6 +2297,8 @@ els.exportDataBtn.addEventListener('click', async () => {
       afternoonStart: settings.afternoonStart,
       holidayCountry: settings.holidayCountry,
       holidayMode: settings.holidayMode,
+      autoLogStatusIds: settings.autoLogStatusIds,
+      taskListStatusIds: settings.taskListStatusIds,
       showWeekends: state.showWeekends,
     },
   };
@@ -1975,7 +2352,7 @@ els.importDataInput.addEventListener('change', async () => {
     const preferences = parsed?.preferences;
     if (preferences && typeof preferences === 'object') {
       const safeSettings = {};
-      for (const key of ['expectedHours', 'annualVacationDays', 'annualVacationDaysByYear', 'morningStart', 'afternoonStart', 'holidayCountry', 'holidayMode']) {
+      for (const key of ['expectedHours', 'annualVacationDays', 'annualVacationDaysByYear', 'morningStart', 'afternoonStart', 'holidayCountry', 'holidayMode', 'autoLogStatusIds', 'taskListStatusIds']) {
         if (preferences[key] !== undefined) safeSettings[key] = preferences[key];
       }
       if (Object.keys(safeSettings).length) await api('/api/settings', {
@@ -2034,6 +2411,7 @@ async function loadSettings() {
     state.holidayMode = ['exclude', 'block'].includes(s.holidayMode) ? 'exclude' : 'mark';
     els.holidayCountryInput.value = state.holidayCountry;
     els.holidayModeInput.value = state.holidayMode;
+    await loadStatusFilters();
     await loadManualHolidays();
     renderManualHolidayList();
     updateHolidayModeAvailability();
@@ -2048,6 +2426,7 @@ async function loadSettings() {
 }
 
 (async function init() {
+  await initializeSettingsSections();
   await migrateLegacyOofData();
   updateWeekendsToggleAvailability();
   renderWeekdayHeader();

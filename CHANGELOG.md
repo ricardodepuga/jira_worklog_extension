@@ -6,6 +6,63 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Task filters now include a manual status synchronization action that refreshes the Jira catalogue and currently assigned active-task statuses without changing saved selections.
+
+## [1.6.7] - 2026-10-08
+
+### Fixed
+
+- Jira status filters now show only statuses used by the authenticated user's assigned active tasks plus selected defaults, hide terminal or unstarted states that are incorrectly categorized as active, and consolidate sprint-generated variants under a single readable status.
+- Broad site-wide selections saved by the initial status-filter implementation are automatically reset, with a manual “Reset defaults” action available in Settings.
+
+## [1.6.6] - 2026-10-08
+
+### Added
+
+- Settings can now independently select the active Jira statuses used by auto-worklog and manual task suggestions; these preferences are included in export/import backups.
+
+### Fixed
+
+- Auto-worklog no longer selects `Verified` tasks by default, even when Jira categorizes that workflow status as In Progress.
+- An outdated service worker is now reported as an incomplete extension update instead of a misleading Jira-status loading failure.
+
+## [1.6.5] - 2026-10-07
+
+### Fixed
+
+- Authentication validation now retries the alternate official Jira API endpoint when `/myself` returns an ambiguous 404, and authentication errors open API credential management instead of suggesting an unrelated Jira browser login.
+- The task InsertBox now resolves a manually entered full Jira key directly, or a numeric issue reference against known project keys, without changing the automatic suggestion rules.
+- Edit and delete operations now revalidate the API token and rediscover the Jira API endpoint before accessing a worklog, preventing stale connection state from producing misleading issue 404 errors.
+- Jira requests now always use the configured API token rather than a cached browser session, retry transient network/server failures once, and reset the selected API endpoint after connection failures.
+- Empty worklog searches revalidate the Jira token connection and repeat the query once before the calendar accepts an empty period.
+
+## [1.6.4] - 2026-10-01
+
+### Fixed
+
+- Switching between month and week views no longer replaces previously loaded worklogs with an empty calendar when a Jira request fails.
+- Week navigation now moves the selected date together with the displayed week.
+- Failed Jira task-list requests are no longer cached as empty results; the InsertBox now offers an inline retry and refreshes its short-lived cache automatically.
+- Story Points discovery now supports multiple Jira fields and persists successful field IDs per site, restoring values across service-worker restarts.
+- A temporary failure while loading optional Story Points metadata no longer blocks auto-log or worklog loading.
+- Jira transport failures now produce a clear network message and expose the scheduled 15-minute auto-log retry in Diagnostics.
+
+## [1.6.3] - 2026-09-25
+
+### Added
+
+- Settings sections are collapsed by default and remember their expanded state locally.
+- Local diagnostics keep the five most recent extension errors with context and technical details.
+- Settings can copy a bug report or clear the stored diagnostics.
+
+### Fixed
+
+- Moved the auto-worklog scheduler status into Diagnostics and fixed the clipped information icon in Settings.
+- Auto-log now uses a true local 18:00 daily alarm, runs a recovery check after late browser or extension startup, and retries transient failures after 15 minutes.
+- Auto-log settings display the latest check result and the reason a run was skipped.
+
 ## [1.6.2] - 2026-09-23
 
 ### Fixed

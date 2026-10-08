@@ -71,8 +71,17 @@
   // Dated Jira search already establishes that the issue was assigned to the
   // requested user at some point on the selected date. Reassignment later that
   // day must not hide work the user may still need to register.
-  function isDatedIssueEligible({ statusCategoryName, wasAssignedOnDate }) {
-    return Boolean(wasAssignedOnDate && statusCategoryName === 'In Progress');
+  function isDatedIssueEligible({ statusId, allowedStatusIds, wasAssignedOnDate }) {
+    return Boolean(wasAssignedOnDate && Array.isArray(allowedStatusIds) && allowedStatusIds.map(String).includes(String(statusId)));
+  }
+
+  function nextDailyRunTime(nowInput, hour, recoverToday = false) {
+    const now = new Date(nowInput);
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 0, 0);
+    if (now < target) return target.getTime();
+    if (recoverToday) return now.getTime() + 1000;
+    target.setDate(target.getDate() + 1);
+    return target.getTime();
   }
 
   // `issues` has { key, isReview, reviewMinute }. A review transition made on
@@ -105,7 +114,7 @@
     return plan;
   }
 
-  const api = { effectiveTimeZone, zonedParts, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, timeToMinutes, minutesToTime, shouldUseAssignmentHistory, isDatedIssueEligible, planAutoWorklogs };
+  const api = { effectiveTimeZone, zonedParts, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, timeToMinutes, minutesToTime, shouldUseAssignmentHistory, isDatedIssueEligible, nextDailyRunTime, planAutoWorklogs };
   globalThis.JiraLogWorkTime = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

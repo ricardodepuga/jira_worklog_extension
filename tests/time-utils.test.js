@@ -52,16 +52,32 @@ test('uses assignment history for both today and past dates', () => {
 
 test('keeps a dated in-progress task after it was reassigned to QA', () => {
   assert.equal(time.isDatedIssueEligible({
-    statusCategoryName: 'In Progress',
+    statusId: '3',
+    allowedStatusIds: ['3', '10020'],
     wasAssignedOnDate: true,
     assigneeAtEndOfDay: 'qa-account',
     requestedAccountId: 'developer-account',
   }), true);
 
   assert.equal(time.isDatedIssueEligible({
-    statusCategoryName: 'Done',
+    statusId: '5',
+    allowedStatusIds: ['3', '10020'],
     wasAssignedOnDate: true,
     assigneeAtEndOfDay: 'qa-account',
     requestedAccountId: 'developer-account',
   }), false);
+});
+
+test('schedules auto-log at 18:00 with late-start recovery', () => {
+  const before = new Date(2026, 8, 24, 17, 30, 0);
+  const scheduledToday = new Date(time.nextDailyRunTime(before, 18));
+  assert.equal(scheduledToday.getDate(), 24);
+  assert.equal(scheduledToday.getHours(), 18);
+  assert.equal(scheduledToday.getMinutes(), 0);
+
+  const after = new Date(2026, 8, 24, 18, 33, 0);
+  assert.equal(time.nextDailyRunTime(after, 18, true), after.getTime() + 1000);
+  const scheduledTomorrow = new Date(time.nextDailyRunTime(after, 18, false));
+  assert.equal(scheduledTomorrow.getDate(), 25);
+  assert.equal(scheduledTomorrow.getHours(), 18);
 });
