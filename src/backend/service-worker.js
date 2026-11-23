@@ -1,6 +1,6 @@
 importScripts('../shared/time-utils.js', '../shared/diagnostics-utils.js', '../shared/jira-utils.js');
 
-const { effectiveTimeZone, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, shouldUseAssignmentHistory, isDatedIssueEligible, nextDailyRunTime, planAutoWorklogs } = globalThis.JiraLogWorkTime;
+const { effectiveTimeZone, instantForZonedDateTime, offsetAtZonedDateTime, formatOffset, dateAndMinutesInTimeZone, absencePeriodForDate, combinedDayAbsence, expectedHoursForDay, workStartForDay, shouldUseAssignmentHistory, isDatedIssueEligible, nextDailyRunTime, planAutoWorklogs } = globalThis.JiraLogWorkTime;
 const { createDiagnosticEntry, keepLatestDiagnostics } = globalThis.JiraLogWorkDiagnostics;
 const { findStoryPointsFieldIds, isRetryableJiraStatus, shouldTryAlternateJiraEndpoint, activeWorkflowStatuses, effectiveStatusIds, relevantWorkflowStatuses, isLegacyBroadStatusSelection, manualIssueKeys } = globalThis.JiraLogWorkJira;
 
@@ -125,8 +125,8 @@ function updateSettings(patch) {
     }
     if (patch.annualVacationDays !== undefined) {
       const n = Number(patch.annualVacationDays);
-      if (!Number.isInteger(n) || n < 0 || n > 366) {
-        throw new Error('Annual vacation entitlement must be a whole number of days.');
+      if (!Number.isFinite(n) || n < 0 || n > 366 || Math.round(n * 2) !== n * 2) {
+        throw new Error('Annual vacation entitlement must be a multiple of 0.5 days.');
       }
       settings.annualVacationDays = n;
     }
@@ -137,8 +137,8 @@ function updateSettings(patch) {
       const normalized = {};
       for (const [year, rawDays] of Object.entries(patch.annualVacationDaysByYear)) {
         const days = Number(rawDays);
-        if (!/^\d{4}$/.test(year) || !Number.isInteger(days) || days < 0 || days > 366) {
-          throw new Error('Each annual vacation entitlement must use a valid year and a whole number of days.');
+        if (!/^\d{4}$/.test(year) || !Number.isFinite(days) || days < 0 || days > 366 || Math.round(days * 2) !== days * 2) {
+          throw new Error('Each annual vacation entitlement must use a valid year and a multiple of 0.5 days.');
         }
         normalized[year] = days;
       }
@@ -807,13 +807,20 @@ async function runAutoLog() {
   if (state.settings.lastAutoLogDate === date) return skip('Auto-log has already completed today.');
   if (now.getHours() < AUTO_LOG_HOUR) return skip(`Waiting until ${AUTO_LOG_HOUR}:00.`);
   if ([0, 6].includes(now.getDay())) return skip('Skipped because today is a weekend.');
-  if ((state.oofByAccount[state.me.accountId] || []).includes(date)) return skip('Skipped because today is marked OOF.');
-  if ((state.vacationByAccount[state.me.accountId] || []).includes(date)) return skip('Skipped because today is marked as Vacation.');
+  const oofPeriod = absencePeriodForDate(state.oofByAccount[state.me.accountId], date);
+  const vacationPeriod = absencePeriodForDate(state.vacationByAccount[state.me.accountId], date);
+  const dayAbsence = combinedDayAbsence(oofPeriod, vacationPeriod);
+  if (dayAbsence.isSplit) return skip('Skipped because today is marked as OOF and Vacation.');
+  if (dayAbsence.oof === 'full') return skip('Skipped because today is marked OOF.');
+  if (dayAbsence.vacation === 'full') return skip('Skipped because today is marked as Vacation.');
   if (await excludedHolidayForDate(date)) return skip('Skipped because today is an excluded holiday.');
   const existing = await getWorklogs(state.me.accountId, date, date);
   if ((existing.byDate[date] || []).length) return skip('Skipped because today already has one or more worklogs.');
+  const absencePeriod = dayAbsence.occupiedPeriod;
+  const targetHours = expectedHoursForDay(state.settings.expectedHours, absencePeriod);
+  const startTime = workStartForDay(state.settings.morningStart, state.settings.afternoonStart, absencePeriod);
   const inProgress = await inProgressIssues(state.me.accountId, date);
-  const plan = await autoPlan(inProgress, state.settings.expectedHours, date, effectiveTimeZone(state.me?.timeZone), state.settings.morningStart);
+  const plan = await autoPlan(inProgress, targetHours, date, effectiveTimeZone(state.me?.timeZone), startTime);
   if (!plan.length) return skip('No tasks matched the configured auto-worklog statuses for today.');
   for (const item of plan) {
     // The user may disable auto-log while Jira queries are still in flight.
@@ -867,3 +874,31 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 void ensureAutoLogAlarm();
+
+if (typeof module !== 'undefined') {
+  module.exports = {
+    DEFAULTS,
+    AUTO_LOG_COMMENT,
+    stored,
+    updateSettings,
+    cleanSite,
+    validateSite,
+    adfToText,
+    toAdfComment,
+    parseAutoMarker,
+    handleApi,
+    runAutoLog,
+    reviewTransitionMinute,
+    autoPlan,
+    wasEligibleAtDateCutoff,
+    searchIssues,
+    getWorklogs,
+    excludedHolidayForDate,
+    holidaysForYear,
+    scheduleAutoLogAlarm,
+    ensureAutoLogAlarm,
+    recordExtensionError,
+    apiErrorContext,
+  };
+}
+

@@ -1,3 +1,4 @@
+const { absencePeriodForDate, combinedDayAbsence, expectedHoursForDay, workStartForDay } = globalThis.JiraLogWorkTime;
 const $ = (id) => document.getElementById(id);
 let expectedHoursPerDay = 7;
 let savedConnection = null;
@@ -28,7 +29,7 @@ function showError(error) {
 }
 
 function formatTimeLabel(time) { return time.replace(/^0/, ''); }
-function applyWorkingPeriods(settings) {
+function applyWorkingPeriods(settings, absencePeriod = null) {
   const morning = settings.morningStart || '09:00';
   const afternoon = settings.afternoonStart || '14:00';
   const buttons = document.querySelectorAll('.time-quick-btn');
@@ -36,7 +37,7 @@ function applyWorkingPeriods(settings) {
     button.dataset.time = time;
     button.textContent = formatTimeLabel(time);
   });
-  $('time').value = morning;
+  $('time').value = workStartForDay(morning, afternoon, absencePeriod);
 }
 
 function showSetup(message = '') {
@@ -73,13 +74,24 @@ document.querySelectorAll('.time-quick-btn').forEach((button) => {
 $('time').addEventListener('change', updateSuggestedHours);
 
 async function loadWorklogForm() {
-  const [me, settings] = await Promise.all([api('/api/me'), api('/api/settings')]);
+  const [me, settings, storage] = await Promise.all([
+    api('/api/me'),
+    api('/api/settings'),
+    chrome.storage.local.get(['oofByAccount', 'vacationByAccount']),
+  ]);
+  const todayDate = today();
+  const dayAbsence = combinedDayAbsence(
+    absencePeriodForDate(storage.oofByAccount?.[me.accountId], todayDate),
+    absencePeriodForDate(storage.vacationByAccount?.[me.accountId], todayDate),
+  );
+  const absencePeriod = dayAbsence.occupiedPeriod;
   const configuredExpectedHours = Number(settings.expectedHours);
-  expectedHoursPerDay = Number.isFinite(configuredExpectedHours) && configuredExpectedHours > 0
+  const baseExpectedHours = Number.isFinite(configuredExpectedHours) && configuredExpectedHours > 0
     ? configuredExpectedHours
     : 7;
-  $('hours').max = String(expectedHoursPerDay);
-  applyWorkingPeriods(settings);
+  expectedHoursPerDay = expectedHoursForDay(baseExpectedHours, absencePeriod) || baseExpectedHours;
+  $('hours').max = String(baseExpectedHours);
+  applyWorkingPeriods(settings, absencePeriod);
   const issues = await api(`/api/issues/open?accountId=${encodeURIComponent(me.accountId)}&date=${today()}`);
   $('setupForm').hidden = true;
   if (!issues.length) {
@@ -161,3 +173,18 @@ async function init() {
   }
 }
 init();
+
+if (typeof module !== 'undefined') {
+  module.exports = {
+    today,
+    api,
+    showError,
+    formatTimeLabel,
+    applyWorkingPeriods,
+    showSetup,
+    updateSuggestedHours,
+    loadWorklogForm,
+    init,
+  };
+}
+

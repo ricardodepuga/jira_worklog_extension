@@ -1,3 +1,17 @@
+const {
+  roundToHalfHour,
+  normalizeAbsencePeriod,
+  absenceDaysForPeriod,
+  parseAbsenceEntry,
+  absenceMapFromList,
+  serializeAbsenceMap,
+  mergeAbsenceLists,
+  combinedDayAbsence,
+  periodsFromDayHalves,
+  expectedHoursForDay,
+  workStartForDay,
+} = globalThis.JiraLogWorkTime;
+
 const state = {
   me: null, // token owner: { accountId, displayName, email }
   user: null, // currently viewed user: { accountId, displayName, email }
@@ -17,8 +31,9 @@ const state = {
   selectedWeekByDate: {},
   refreshToken: 0, // prevents slower, older Jira responses replacing the latest view
   openIssuesCache: new Map(), // per-date cached suggestions, keyed by dateStr
-  oofDates: new Set(), // dates marked as out-of-office for state.user
-  vacationDates: new Set(), // dates marked as vacation for state.user
+  oofDates: new Map(), // YYYY-MM-DD -> 'full' | 'am' | 'pm' for state.user
+  vacationDates: new Map(), // YYYY-MM-DD -> 'full' | 'am' | 'pm' for state.user
+  bulkAbsencePeriod: 'full', // 'full' | 'am' | 'pm'
   publicHolidays: new Map(), // YYYY-MM-DD -> { name, localName }
   manualHolidays: new Map(), // locally configured YYYY-MM-DD holidays
   holidayCountry: '',
@@ -54,42 +69,79 @@ async function initializeSettingsSections() {
 
 async function loadOofDates(accountId) {
   const { oofByAccount = {} } = await chrome.storage.local.get('oofByAccount');
-  return new Set(oofByAccount[accountId] || []);
+  return absenceMapFromList(oofByAccount[accountId] || []);
 }
 
-async function setOofDate(accountId, dateStr, isOof) {
+async function setDayHalves(accountId, dateStr, amCategory, pmCategory) {
   const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
-  const set = new Set(oofByAccount[accountId] || []);
-  if (isOof) set.add(dateStr);
-  else set.delete(dateStr);
-  oofByAccount[accountId] = Array.from(set);
-  if (isOof) {
-    const vacations = new Set(vacationByAccount[accountId] || []);
-    vacations.delete(dateStr);
-    vacationByAccount[accountId] = Array.from(vacations);
-  }
+  const oofMap = absenceMapFromList(oofByAccount[accountId] || []);
+  const vacationMap = absenceMapFromList(vacationByAccount[accountId] || []);
+  const { oofPeriod: nextOof, vacationPeriod: nextVac } = periodsFromDayHalves(amCategory, pmCategory);
+  if (nextOof) oofMap.set(dateStr, nextOof);
+  else oofMap.delete(dateStr);
+  if (nextVac) vacationMap.set(dateStr, nextVac);
+  else vacationMap.delete(dateStr);
+  oofByAccount[accountId] = serializeAbsenceMap(oofMap);
+  vacationByAccount[accountId] = serializeAbsenceMap(vacationMap);
   await chrome.storage.local.set({ oofByAccount, vacationByAccount });
-  return set;
+  return { oofDates: oofMap, vacationDates: vacationMap };
+}
+
+async function setDayAbsence(accountId, dateStr, category, period = 'full') {
+  const normalizedPeriod = normalizeAbsencePeriod(period) || 'full';
+  const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
+  const oofMap = absenceMapFromList(oofByAccount[accountId] || []);
+  const vacationMap = absenceMapFromList(vacationByAccount[accountId] || []);
+  const current = combinedDayAbsence(oofMap.get(dateStr) || null, vacationMap.get(dateStr) || null);
+  let am = current.am;
+  let pm = current.pm;
+  if (category === 'none') {
+    am = 'none';
+    pm = 'none';
+  } else if (normalizedPeriod === 'full') {
+    am = category;
+    pm = category;
+  } else if (normalizedPeriod === 'am') {
+    am = category;
+    if (pm === category) pm = 'none';
+  } else if (normalizedPeriod === 'pm') {
+    pm = category;
+    if (am === category) am = 'none';
+  }
+  return setDayHalves(accountId, dateStr, am, pm);
+}
+
+async function setOofDate(accountId, dateStr, isOofOrPeriod) {
+  const period = isOofOrPeriod === true ? 'full' : isOofOrPeriod ? normalizeAbsencePeriod(isOofOrPeriod) : null;
+  if (!period) {
+    const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
+    const oofMap = absenceMapFromList(oofByAccount[accountId] || []);
+    const vacationMap = absenceMapFromList(vacationByAccount[accountId] || []);
+    const current = combinedDayAbsence(oofMap.get(dateStr) || null, vacationMap.get(dateStr) || null);
+    const { oofDates } = await setDayHalves(accountId, dateStr, current.am === 'oof' ? 'none' : current.am, current.pm === 'oof' ? 'none' : current.pm);
+    return oofDates;
+  }
+  const { oofDates } = await setDayAbsence(accountId, dateStr, 'oof', period);
+  return oofDates;
 }
 
 async function loadVacationDates(accountId) {
   const { vacationByAccount = {} } = await chrome.storage.local.get('vacationByAccount');
-  return new Set(vacationByAccount[accountId] || []);
+  return absenceMapFromList(vacationByAccount[accountId] || []);
 }
 
-async function setVacationDate(accountId, dateStr, isVacation) {
-  const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
-  const set = new Set(vacationByAccount[accountId] || []);
-  if (isVacation) set.add(dateStr);
-  else set.delete(dateStr);
-  vacationByAccount[accountId] = Array.from(set);
-  if (isVacation) {
-    const oof = new Set(oofByAccount[accountId] || []);
-    oof.delete(dateStr);
-    oofByAccount[accountId] = Array.from(oof);
+async function setVacationDate(accountId, dateStr, isVacationOrPeriod) {
+  const period = isVacationOrPeriod === true ? 'full' : isVacationOrPeriod ? normalizeAbsencePeriod(isVacationOrPeriod) : null;
+  if (!period) {
+    const { oofByAccount = {}, vacationByAccount = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount']);
+    const oofMap = absenceMapFromList(oofByAccount[accountId] || []);
+    const vacationMap = absenceMapFromList(vacationByAccount[accountId] || []);
+    const current = combinedDayAbsence(oofMap.get(dateStr) || null, vacationMap.get(dateStr) || null);
+    const { vacationDates } = await setDayHalves(accountId, dateStr, current.am === 'vacation' ? 'none' : current.am, current.pm === 'vacation' ? 'none' : current.pm);
+    return vacationDates;
   }
-  await chrome.storage.local.set({ oofByAccount, vacationByAccount });
-  return set;
+  const { vacationDates } = await setDayAbsence(accountId, dateStr, 'vacation', period);
+  return vacationDates;
 }
 
 async function loadManualHolidays() {
@@ -143,7 +195,7 @@ async function migrateLegacyOofData() {
     if (!legacy || !Object.keys(legacy).length) return;
     const { oofByAccount = {} } = await chrome.storage.local.get('oofByAccount');
     for (const [accountId, dates] of Object.entries(legacy)) {
-      oofByAccount[accountId] = Array.from(new Set([...(oofByAccount[accountId] || []), ...(Array.isArray(dates) ? dates : [])]));
+      oofByAccount[accountId] = mergeAbsenceLists(oofByAccount[accountId] || [], Array.isArray(dates) ? dates : []);
     }
     await chrome.storage.local.set({ oofByAccount });
     localStorage.removeItem(OOF_STORAGE_KEY);
@@ -206,6 +258,8 @@ const els = {
   bulkCount: document.getElementById('bulkCount'),
   bulkSummary: document.getElementById('bulkSummary'),
   bulkError: document.getElementById('bulkError'),
+  bulkPeriodBar: document.getElementById('bulkPeriodBar'),
+  bulkPeriodSelector: document.getElementById('bulkPeriodSelector'),
   bulkActions: document.getElementById('bulkActions'),
   bulkCloseBtn: document.getElementById('bulkCloseBtn'),
   bulkOofBtn: document.getElementById('bulkOofBtn'),
@@ -259,8 +313,50 @@ function startTimeFieldHtml(inputHtml) {
   return `<div class="time-field"><span class="time-field-label">Start time</span>${quickTimeButtonsHtml()}${inputHtml}</div>`;
 }
 function holidayForDate(dateStr) { return state.publicHolidays.get(dateStr) || null; }
+function oofPeriod(dateStr) { return state.oofDates.get(dateStr) || null; }
+function vacationPeriod(dateStr) { return state.vacationDates.get(dateStr) || null; }
+function dayAbsence(dateStr) {
+  return combinedDayAbsence(oofPeriod(dateStr), vacationPeriod(dateStr));
+}
+function absenceInfo(dateStr) {
+  const abs = dayAbsence(dateStr);
+  if (!abs.hasAbsence) return null;
+  if (abs.isSplit) {
+    return {
+      type: 'split',
+      period: 'full',
+      days: 1,
+      am: abs.am,
+      pm: abs.pm,
+      oofPeriod: abs.oofPeriod,
+      vacationPeriod: abs.vacationPeriod,
+    };
+  }
+  if (abs.oofPeriod) return { type: 'oof', period: abs.oofPeriod, days: absenceDaysForPeriod(abs.oofPeriod), am: abs.am, pm: abs.pm };
+  if (abs.vacationPeriod) return { type: 'vacation', period: abs.vacationPeriod, days: absenceDaysForPeriod(abs.vacationPeriod), am: abs.am, pm: abs.pm };
+  return null;
+}
 function isVacation(dateStr) { return state.vacationDates.has(dateStr); }
-function isAbsence(dateStr) { return state.oofDates.has(dateStr) || isVacation(dateStr); }
+function isAbsence(dateStr) { return dayAbsence(dateStr).hasAbsence; }
+function isFullAbsence(dateStr) { return dayAbsence(dateStr).isFull; }
+function isHalfAbsence(dateStr) { return dayAbsence(dateStr).isHalf; }
+function dayExpectedHours(dateStr) {
+  return expectedHoursForDay(state.expectedHours, dayAbsence(dateStr).occupiedPeriod);
+}
+function fmtDays(d) {
+  return String(Math.round(Number(d || 0) * 10) / 10);
+}
+function absencePeriodLongLabel(period) {
+  if (period === 'am') return 'Morning (0.5d)';
+  if (period === 'pm') return 'Afternoon (0.5d)';
+  return 'Full day (1d)';
+}
+function defaultHalfDayPeriodForEntries(entries) {
+  if (!entries || !entries.length) return 'am';
+  const firstStartMin = timeToMinutes(extractTime(entries[0].started));
+  const afternoonMin = timeToMinutes(state.afternoonStart || '14:00');
+  return firstStartMin < afternoonMin ? 'pm' : 'am';
+}
 function isExcludedHoliday(dateStr) { return ['exclude', 'block'].includes(state.holidayMode) && Boolean(holidayForDate(dateStr)); }
 function entriesInChronologicalOrder(entries) {
   return entries.slice().sort((a, b) => {
@@ -342,8 +438,6 @@ function escapeHtml(str) {
 }
 
 function secondsToHours(s) { return s / 3600; }
-// Hours are entered/edited in 30-minute increments only (0.5h steps).
-function roundToHalfHour(h) { return Math.round(h * 2) / 2; }
 function fmtHours(h) {
   if (h === 0) return '0h';
   return (Math.round(h * 100) / 100).toString() + 'h';
@@ -589,10 +683,13 @@ function wireCalendarDayInteractions(selector) {
   });
 }
 
-function monthChipLimit() {
-  if (window.innerHeight < 850) return 1;
-  if (window.innerHeight < 1050) return 2;
-  return 3;
+function monthChipLimit(rowCount = 5) {
+  const gridHeight = els.calendarGrid?.clientHeight || Math.max(240, window.innerHeight - 330);
+  const cellHeight = gridHeight / Math.max(4, rowCount);
+  if (cellHeight < 112) return 1;
+  if (cellHeight < 136) return 2;
+  if (cellHeight < 160) return 3;
+  return 4;
 }
 
 function renderYearGrid() {
@@ -611,13 +708,41 @@ function renderYearGrid() {
       const dateStr = fmtDate(date);
       const entries = state.byDate[dateStr] || [];
       const hours = secondsToHours(entries.reduce((sum, entry) => sum + Number(entry.seconds || 0), 0));
-      const isOof = state.oofDates.has(dateStr);
-      const vacation = isVacation(dateStr);
+      const abs = dayAbsence(dateStr);
+      const isSplit = abs.isSplit;
+      const isOof = !isSplit && Boolean(abs.oofPeriod);
+      const vacation = !isSplit && Boolean(abs.vacationPeriod);
+      const isHalf = abs.isHalf;
+      const expectedForDay = dayExpectedHours(dateStr);
       const holiday = holidayForDate(dateStr);
       const holidayName = holiday?.localName || holiday?.name || '';
-      const classes = ['year-day', dateStr === todayStr() ? 'today' : '', state.selectedDates.has(dateStr) ? 'selected' : '', isOof ? 'oof' : '', vacation ? 'vacation' : '', holiday ? 'holiday' : '', entries.length ? badgeClass(hours, state.expectedHours, false) : 'none'].filter(Boolean).join(' ');
-      const detail = isOof ? 'OOF' : vacation ? 'VAC' : holidayName || (entries.length ? fmtHours(hours) : '');
-      slots.push(`<button type="button" class="${classes}" data-date="${dateStr}" title="${escapeHtml(holidayName || dateStr)}"><span>${day}</span><small>${escapeHtml(detail)}</small></button>`);
+      const classes = [
+        'year-day',
+        dateStr === todayStr() ? 'today' : '',
+        state.selectedDates.has(dateStr) ? 'selected' : '',
+        isSplit ? (abs.am === 'oof' ? 'split-oof-vacation' : 'split-vacation-oof') : '',
+        isOof ? 'oof' : '',
+        vacation ? 'vacation' : '',
+        isHalf ? `half-absence half-${abs.occupiedPeriod}` : '',
+        holiday ? 'holiday' : '',
+        entries.length ? badgeClass(hours, expectedForDay, false) : 'none',
+      ].filter(Boolean).join(' ');
+      const detail = isSplit
+        ? '½O·½V'
+        : isOof
+          ? (isHalf ? '½OOF' : 'OOF')
+          : vacation
+            ? (isHalf ? '½VAC' : 'VAC')
+            : holidayName || (entries.length ? fmtHours(hours) : '');
+      const titleParts = [dateStr];
+      if (isSplit) {
+        titleParts.push(`Morning: ${abs.am === 'oof' ? 'OOF' : 'Vacation'} (0.5d) · Afternoon: ${abs.pm === 'oof' ? 'OOF' : 'Vacation'} (0.5d)`);
+      } else if (abs.hasAbsence) {
+        titleParts.push(`${isOof ? 'OOF' : 'Vacation'} · ${absencePeriodLongLabel(abs.occupiedPeriod)}`);
+      }
+      if (holidayName) titleParts.push(holidayName);
+      if (entries.length) titleParts.push(fmtHours(hours));
+      slots.push(`<button type="button" class="${classes}" data-date="${dateStr}" title="${escapeHtml(titleParts.join(' · '))}"><span>${day}</span><small>${escapeHtml(detail)}</small></button>`);
     }
     return `<section class="year-month"><h3>${label}</h3><div class="year-weekdays" style="grid-template-columns:repeat(${weekdayLabels.length},1fr)">${weekdayLabels.map((d) => `<span>${d.slice(0, 1)}</span>`).join('')}</div><div class="year-days" style="grid-template-columns:repeat(${weekdayLabels.length},1fr)">${slots.join('')}</div></section>`;
   });
@@ -637,7 +762,10 @@ function renderGrid() {
   els.calendarGrid.classList.remove('year-view');
   els.calendarGrid.classList.toggle('week-view', state.view === 'week');
   const hideWeekends = weekendsHiddenNow();
-  els.calendarGrid.style.gridTemplateColumns = `repeat(${hideWeekends ? 5 : 7}, 1fr)`;
+  const colCount = hideWeekends ? 5 : 7;
+  els.calendarGrid.style.gridTemplateColumns = `repeat(${colCount}, 1fr)`;
+  const totalDaysSpan = Math.round((gridEnd - gridStart) / 86400000) + 1;
+  const rowCount = Math.max(1, Math.round(totalDaysSpan / 7));
   const today = todayStr();
   const cells = [];
   const cursor = new Date(gridStart);
@@ -657,8 +785,12 @@ function renderGrid() {
     if (!inRange) {
       cells.push(`<div class="day-cell empty-slot"></div>`);
     } else {
-      const isOof = state.oofDates.has(dateStr);
-      const vacation = isVacation(dateStr);
+      const abs = dayAbsence(dateStr);
+      const isSplit = abs.isSplit;
+      const isOof = !isSplit && Boolean(abs.oofPeriod);
+      const vacation = !isSplit && Boolean(abs.vacationPeriod);
+      const isHalf = abs.isHalf;
+      const expectedForDay = dayExpectedHours(dateStr);
       const holiday = holidayForDate(dateStr);
       const holidayName = holiday?.localName || holiday?.name || 'Holiday';
       const excludedHoliday = isExcludedHoliday(dateStr);
@@ -668,35 +800,64 @@ function renderGrid() {
         isFuture ? 'future' : '',
         dateStr === today ? 'today' : '',
         state.selectedDates.has(dateStr) ? 'selected' : '',
+        isSplit ? (abs.am === 'oof' ? 'split-oof-vacation' : 'split-vacation-oof') : '',
         isOof ? 'oof' : '',
         vacation ? 'vacation' : '',
+        isHalf ? `half-absence half-${abs.occupiedPeriod}` : '',
         holiday ? 'holiday' : '',
         excludedHoliday ? 'holiday-blocked' : '',
       ].filter(Boolean).join(' ');
 
-      const badge = isOof
-        ? `<span class="hours-badge oof-badge">OOF</span>`
-        : vacation
-          ? `<span class="hours-badge vacation-badge">Vacation</span>`
-        : holiday
-          ? `<span class="hours-badge holiday-badge" title="${escapeHtml(holidayName)}">${escapeHtml(holidayName)}</span>`
-        : entries.length || !weekend
-          ? `<span class="hours-badge ${badgeClass(hours, state.expectedHours, weekend)}">${fmtHours(hours)}</span>`
-          : `<span class="hours-badge none">—</span>`;
+      const allTasksTooltip = entries.map((item) => `${item.issueKey} (${fmtHours(secondsToHours(item.seconds))}) — ${item.issueSummary}`).join('\n');
+      const taskCountBadge = state.view === 'month' && entries.length > 0
+        ? `<span class="task-count-badge${entries.length > 1 ? ' multi' : ''}" title="${escapeHtml(allTasksTooltip)}">${entries.length === 1 ? '1 task' : `${entries.length} tasks`}</span>`
+        : '';
 
-      const maxChips = state.view === 'week' ? entries.length : monthChipLimit();
+      let badge;
+      if (isSplit) {
+        const amBadge = `<span class="hours-badge ${abs.am === 'oof' ? 'oof-badge' : 'vacation-badge'} half-badge" title="Morning: ${abs.am === 'oof' ? 'Out of Office' : 'Vacation'} (0.5d)">${abs.am === 'oof' ? 'OOF' : 'Vac'} ½</span>`;
+        const pmBadge = `<span class="hours-badge ${abs.pm === 'oof' ? 'oof-badge' : 'vacation-badge'} half-badge" title="Afternoon: ${abs.pm === 'oof' ? 'Out of Office' : 'Vacation'} (0.5d)">${abs.pm === 'oof' ? 'OOF' : 'Vac'} ½</span>`;
+        badge = `<div class="day-badges">${amBadge}${pmBadge}</div>`;
+      } else if (isHalf) {
+        const absenceBadge = `<span class="hours-badge ${isOof ? 'oof-badge' : 'vacation-badge'} half-badge" title="${isOof ? 'Out of Office' : 'Vacation'} · ${absencePeriodLongLabel(abs.occupiedPeriod)}">${isOof ? 'OOF' : 'Vac'} ½</span>`;
+        const workBadge = (entries.length || (!weekend && !isFuture))
+          ? `<span class="hours-badge ${badgeClass(hours, expectedForDay, weekend)}">${fmtHours(hours)}</span>`
+          : '';
+        badge = `<div class="day-badges">${absenceBadge}${workBadge}</div>`;
+      } else if (isOof) {
+        badge = `<div class="day-badges"><span class="hours-badge oof-badge">OOF</span></div>`;
+      } else if (vacation) {
+        badge = `<div class="day-badges"><span class="hours-badge vacation-badge">Vacation</span></div>`;
+      } else if (holiday) {
+        badge = `<div class="day-badges"><span class="hours-badge holiday-badge" title="${escapeHtml(holidayName)}">${escapeHtml(holidayName)}</span></div>`;
+      } else if (entries.length || !weekend) {
+        badge = `<div class="day-badges"><span class="hours-badge ${badgeClass(hours, expectedForDay, weekend)}">${fmtHours(hours)}</span></div>`;
+      } else {
+        badge = `<div class="day-badges"><span class="hours-badge none">—</span></div>`;
+      }
+
+      const maxChips = state.view === 'week' ? entries.length : monthChipLimit(rowCount);
       const visibleEntries = entries.slice(0, maxChips);
       const hiddenCount = entries.length - visibleEntries.length;
       const chipHtml = visibleEntries
-        .map((e) => state.view === 'week'
-          ? `<span class="chip week-chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}"><span class="chip-time">${extractTime(e.started)}</span><span class="chip-key">${escapeHtml(e.issueKey)}</span><span class="chip-summary">${escapeHtml(e.issueSummary)}</span><span class="chip-hours">${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' <span class="auto-indicator" aria-label="Auto-logged">🤖</span>' : ''}</span></span>`
-          : `<span class="chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}">${escapeHtml(e.issueKey)} · ${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' <span class="auto-indicator" aria-label="Auto-logged">🤖</span>' : ''}</span>`)
+        .map((e, idx) => {
+          if (state.view === 'week') {
+            return `<span class="chip week-chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(e.issueSummary)}${e.autoLogged ? ' (auto-logged)' : ''}"><span class="chip-time">${extractTime(e.started)}</span><span class="chip-key">${escapeHtml(e.issueKey)}</span><span class="chip-summary">${escapeHtml(e.issueSummary)}</span><span class="chip-hours">${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' <span class="auto-indicator" aria-label="Auto-logged">🤖</span>' : ''}</span></span>`;
+          }
+          const isLastVisible = idx === visibleEntries.length - 1;
+          const inlineMore = isLastVisible && hiddenCount > 0
+            ? `<span class="chip-more-inline" title="${escapeHtml(allTasksTooltip)}">+${hiddenCount}</span>`
+            : '';
+          return `<span class="chip${e.autoLogged ? ' auto-chip' : ''}" title="${escapeHtml(allTasksTooltip || e.issueSummary)}"><span class="chip-text"><span class="chip-key">${escapeHtml(e.issueKey)}</span> · ${fmtHours(secondsToHours(e.seconds))}${e.autoLogged ? ' <span class="auto-indicator" aria-label="Auto-logged">🤖</span>' : ''}</span>${inlineMore}</span>`;
+        })
         .join('');
-      const moreChip = hiddenCount > 0 ? `<span class="chip chip-more">+${hiddenCount} more</span>` : '';
-      const extra = `<div class="issue-list">${chipHtml || moreChip ? chipHtml + moreChip : (state.view === 'week' ? '<span class="chip" style="opacity:.5">No entries</span>' : '')}</div>`;
+      const extra = `<div class="issue-list">${chipHtml || (state.view === 'week' ? '<span class="chip" style="opacity:.5">No entries</span>' : '')}</div>`;
 
       cells.push(`<div class="${cls}" data-date="${dateStr}"${holiday ? ` title="${escapeHtml(holiday.localName || holiday.name)}"` : ''}>
-        <div class="date-num">${cursor.getDate()}</div>
+        <div class="day-cell-header">
+          <div class="date-num">${cursor.getDate()}</div>
+          ${taskCountBadge}
+        </div>
         ${extra}
         ${badge}
       </div>`);
@@ -823,30 +984,52 @@ function selectedDatesSorted() {
   return Array.from(state.selectedDates).sort();
 }
 
+function isClearingBulkCategory(dates, map) {
+  return dates.length > 0 && dates.every((dateStr) => map.get(dateStr) === state.bulkAbsencePeriod);
+}
+
 function renderBulkPanel() {
   const dates = selectedDatesSorted();
   const visible = dates.length > 1 && isOwnUser();
   els.bulkPanel.classList.toggle('hidden', !visible);
   if (!visible) return;
   els.bulkCount.textContent = `${dates.length} days selected · Ctrl/Cmd-click to change`;
-  els.bulkOofBtn.textContent = dates.some((dateStr) => state.oofDates.has(dateStr)) ? 'Clear OOF' : 'Mark OOF';
-  els.bulkVacationBtn.textContent = dates.some((dateStr) => isVacation(dateStr)) ? 'Clear vacation' : 'Mark vacation';
+  els.bulkPeriodSelector?.querySelectorAll('[data-bulk-period]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.bulkPeriod === state.bulkAbsencePeriod);
+  });
+  const periodSuffix = state.bulkAbsencePeriod === 'full' ? '' : ` (${state.bulkAbsencePeriod.toUpperCase()})`;
+  els.bulkOofBtn.textContent = isClearingBulkCategory(dates, state.oofDates) ? 'Clear OOF' : `Mark OOF${periodSuffix}`;
+  els.bulkVacationBtn.textContent = isClearingBulkCategory(dates, state.vacationDates) ? 'Clear vacation' : `Mark vacation${periodSuffix}`;
   els.bulkSummary.replaceChildren(...dates.map((dateStr) => {
     const entries = state.byDate[dateStr] || [];
     const hours = fmtHours(secondsToHours(entries.reduce((sum, entry) => sum + entry.seconds, 0)));
     const tasks = [...new Set(entries.map((entry) => entry.issueKey))].join(', ') || 'No worklogs';
+    const abs = dayAbsence(dateStr);
+    const absenceLabel = abs.isSplit
+      ? ` · AM: ${abs.am === 'oof' ? 'OOF' : 'Vac'} (0.5d) + PM: ${abs.pm === 'oof' ? 'OOF' : 'Vac'} (0.5d)`
+      : abs.hasAbsence
+        ? ` · ${abs.oofPeriod ? 'OOF' : 'Vacation'}${abs.occupiedPeriod === 'full' ? '' : ` (${abs.occupiedPeriod.toUpperCase()} · 0.5d)`}`
+        : '';
     const row = document.createElement('div');
     row.className = 'bulk-summary-row';
-    row.textContent = `${dateStr} · ${hours} · ${tasks}${state.oofDates.has(dateStr) ? ' · OOF' : isVacation(dateStr) ? ' · Vacation' : ''}`;
+    row.textContent = `${dateStr} · ${hours} · ${tasks}${absenceLabel}`;
     return row;
   }));
   els.bulkError.classList.add('hidden');
 }
 
+els.bulkPeriodSelector?.querySelectorAll('[data-bulk-period]').forEach((button) => {
+  button.addEventListener('click', () => {
+    state.bulkAbsencePeriod = normalizeAbsencePeriod(button.dataset.bulkPeriod) || 'full';
+    renderBulkPanel();
+  });
+});
+
 function clearBulkSelection() {
   const keep = state.selectedDate || todayStr();
   state.selectedDates = new Set([keep]);
   els.bulkWorklogForm.classList.add('hidden');
+  els.bulkPeriodBar?.classList.remove('hidden');
   els.bulkActions.classList.remove('hidden');
   renderGrid();
   renderBulkPanel();
@@ -856,16 +1039,21 @@ els.bulkCloseBtn.addEventListener('click', clearBulkSelection);
 
 els.bulkOofBtn.addEventListener('click', async () => {
   const dates = selectedDatesSorted();
-  const clearingOof = dates.some((dateStr) => state.oofDates.has(dateStr));
-  const withWorklogs = dates.filter((dateStr) => (state.byDate[dateStr] || []).length > 0);
-  if (!clearingOof && withWorklogs.length) {
-    els.bulkError.textContent = `OOF cannot be applied because these days already have worklogs: ${withWorklogs.join(', ')}`;
+  const clearingOof = isClearingBulkCategory(dates, state.oofDates);
+  const blockedByWorklogs = dates.filter((dateStr) => {
+    if ((state.byDate[dateStr] || []).length === 0) return false;
+    if (state.bulkAbsencePeriod === 'full') return true;
+    const abs = dayAbsence(dateStr);
+    return state.bulkAbsencePeriod === 'am' ? abs.pm === 'vacation' : abs.am === 'vacation';
+  });
+  if (!clearingOof && blockedByWorklogs.length) {
+    els.bulkError.textContent = `Full-day absence cannot be applied because these days already have worklogs: ${blockedByWorklogs.join(', ')}. Choose Morning or Afternoon for a half day.`;
     els.bulkError.classList.remove('hidden');
     return;
   }
   els.bulkOofBtn.disabled = true;
   try {
-    for (const dateStr of dates) await setOofDate(state.me.accountId, dateStr, !clearingOof);
+    for (const dateStr of dates) await setOofDate(state.me.accountId, dateStr, clearingOof ? null : state.bulkAbsencePeriod);
     state.oofDates = await loadOofDates(state.me.accountId);
     state.vacationDates = await loadVacationDates(state.me.accountId);
     renderGrid();
@@ -878,16 +1066,21 @@ els.bulkOofBtn.addEventListener('click', async () => {
 
 els.bulkVacationBtn.addEventListener('click', async () => {
   const dates = selectedDatesSorted();
-  const clearingVacation = dates.some((dateStr) => isVacation(dateStr));
-  const withWorklogs = dates.filter((dateStr) => (state.byDate[dateStr] || []).length > 0);
-  if (!clearingVacation && withWorklogs.length) {
-    els.bulkError.textContent = `Vacation cannot be applied because these days already have worklogs: ${withWorklogs.join(', ')}`;
+  const clearingVacation = isClearingBulkCategory(dates, state.vacationDates);
+  const blockedByWorklogs = dates.filter((dateStr) => {
+    if ((state.byDate[dateStr] || []).length === 0) return false;
+    if (state.bulkAbsencePeriod === 'full') return true;
+    const abs = dayAbsence(dateStr);
+    return state.bulkAbsencePeriod === 'am' ? abs.pm === 'oof' : abs.am === 'oof';
+  });
+  if (!clearingVacation && blockedByWorklogs.length) {
+    els.bulkError.textContent = `Full-day absence cannot be applied because these days already have worklogs: ${blockedByWorklogs.join(', ')}. Choose Morning or Afternoon for a half day.`;
     els.bulkError.classList.remove('hidden');
     return;
   }
   els.bulkVacationBtn.disabled = true;
   try {
-    for (const dateStr of dates) await setVacationDate(state.me.accountId, dateStr, !clearingVacation);
+    for (const dateStr of dates) await setVacationDate(state.me.accountId, dateStr, clearingVacation ? null : state.bulkAbsencePeriod);
     state.vacationDates = await loadVacationDates(state.me.accountId);
     state.oofDates = await loadOofDates(state.me.accountId);
     renderGrid();
@@ -903,7 +1096,7 @@ els.bulkWorklogBtn.addEventListener('click', async () => {
   els.bulkError.classList.add('hidden');
   els.bulkWorklogBtn.disabled = true;
   try {
-    if (dates.some((dateStr) => isAbsence(dateStr))) throw new Error('Remove OOF or Vacation from the selected days before adding worklogs.');
+    if (dates.some((dateStr) => isFullAbsence(dateStr))) throw new Error('Remove full-day OOF or Vacation from the selected days before adding worklogs.');
     const issueLists = await Promise.all(dates.map((dateStr) => api(`/api/issues/open?accountId=${encodeURIComponent(state.me.accountId)}&date=${encodeURIComponent(dateStr)}`)));
     const keySignatures = issueLists.map((issues) => issues.map((issue) => issue.key).sort().join('|'));
     if (!issueLists[0].length || !keySignatures.every((signature) => signature === keySignatures[0])) {
@@ -916,8 +1109,11 @@ els.bulkWorklogBtn.addEventListener('click', async () => {
       option.dataset.summary = issue.summary;
       return option;
     }));
-    els.bulkHours.value = state.expectedHours;
-    els.bulkTime.value = state.morningStart;
+    const periods = dates.map((dateStr) => dayAbsence(dateStr).occupiedPeriod || null);
+    const commonHalfPeriod = periods.every((p) => p === 'am' || p === 'pm') ? periods[0] : null;
+    els.bulkHours.value = expectedHoursForDay(state.expectedHours, commonHalfPeriod);
+    els.bulkTime.value = workStartForDay(state.morningStart, state.afternoonStart, commonHalfPeriod);
+    els.bulkPeriodBar?.classList.add('hidden');
     els.bulkActions.classList.add('hidden');
     els.bulkWorklogForm.classList.remove('hidden');
   } catch (error) {
@@ -930,6 +1126,7 @@ els.bulkWorklogBtn.addEventListener('click', async () => {
 
 els.bulkCancelBtn.addEventListener('click', () => {
   els.bulkWorklogForm.classList.add('hidden');
+  els.bulkPeriodBar?.classList.remove('hidden');
   els.bulkActions.classList.remove('hidden');
 });
 
@@ -966,18 +1163,28 @@ els.bulkSaveBtn.addEventListener('click', async () => {
 function renderDayDialogBody(dateStr) {
   const entries = entriesInChronologicalOrder(state.byDate[dateStr] || []);
   const own = isOwnUser();
-  const isOof = state.oofDates.has(dateStr);
-  const vacation = isVacation(dateStr);
+  const abs = dayAbsence(dateStr);
+  const isSplit = abs.isSplit;
+  const isOof = Boolean(abs.oofPeriod);
+  const vacation = Boolean(abs.vacationPeriod);
+  const isFull = abs.isFull;
+  const isHalf = abs.isHalf;
   const holiday = holidayForDate(dateStr);
   const excludedHoliday = isExcludedHoliday(dateStr);
 
   let html = '';
-  // Never shown once the day has any logged task, or while the add-worklog
-  // form is expanded (that form gets hidden again in wireAddEntryForm).
-  const canManageAbsence = own && entries.length === 0;
+  // Displayed for the owner; when the day already has worklogs, full-day
+  // absence is disabled while Morning/Afternoon half-day absences remain selectable.
+  const canManageAbsence = own;
 
   if (canManageAbsence) {
-    const selectedCategory = isOof ? 'oof' : vacation ? 'vacation' : 'none';
+    const selectedCategory = !abs.hasAbsence
+      ? 'none'
+      : abs.oofPeriod === 'full'
+        ? 'oof'
+        : abs.vacationPeriod === 'full'
+          ? 'vacation'
+          : 'partial';
     html += `
       <div id="oofToggleWrapper">
         <div class="absence-label">Day category</div>
@@ -985,6 +1192,24 @@ function renderDayDialogBody(dateStr) {
           <button type="button" data-absence="none" class="${selectedCategory === 'none' ? 'active' : ''}"><span class="absence-dot none"></span>Working day</button>
           <button type="button" data-absence="oof" class="${selectedCategory === 'oof' ? 'active' : ''}"><span class="absence-dot oof"></span>OOF</button>
           <button type="button" data-absence="vacation" class="${selectedCategory === 'vacation' ? 'active' : ''}"><span class="absence-dot vacation"></span>Vacation</button>
+        </div>
+        <div class="absence-halves-box" aria-label="Half-day breakdown">
+          <div class="absence-half-card">
+            <span class="absence-half-title">Morning (0.5d)</span>
+            <div class="absence-half-options" role="group" aria-label="Morning category">
+              <button type="button" data-half-slot="am" data-half-cat="none" class="${abs.am === 'none' ? 'active' : ''}">Work</button>
+              <button type="button" data-half-slot="am" data-half-cat="oof" class="${abs.am === 'oof' ? 'active oof' : ''}"${entries.length && abs.pm !== 'none' ? ' disabled title="Delete worklogs on this day before marking both halves as absent"' : ''}>OOF</button>
+              <button type="button" data-half-slot="am" data-half-cat="vacation" class="${abs.am === 'vacation' ? 'active vacation' : ''}"${entries.length && abs.pm !== 'none' ? ' disabled title="Delete worklogs on this day before marking both halves as absent"' : ''}>Vacation</button>
+            </div>
+          </div>
+          <div class="absence-half-card">
+            <span class="absence-half-title">Afternoon (0.5d)</span>
+            <div class="absence-half-options" role="group" aria-label="Afternoon category">
+              <button type="button" data-half-slot="pm" data-half-cat="none" class="${abs.pm === 'none' ? 'active' : ''}">Work</button>
+              <button type="button" data-half-slot="pm" data-half-cat="oof" class="${abs.pm === 'oof' ? 'active oof' : ''}"${entries.length && abs.am !== 'none' ? ' disabled title="Delete worklogs on this day before marking both halves as absent"' : ''}>OOF</button>
+              <button type="button" data-half-slot="pm" data-half-cat="vacation" class="${abs.pm === 'vacation' ? 'active vacation' : ''}"${entries.length && abs.am !== 'none' ? ' disabled title="Delete worklogs on this day before marking both halves as absent"' : ''}>Vacation</button>
+            </div>
+          </div>
         </div>
       </div>`;
   }
@@ -994,6 +1219,15 @@ function renderDayDialogBody(dateStr) {
     html += `<div class="holiday-note${excludedHoliday ? ' blocked' : ''}">${holidayName}${excludedHoliday ? ' — excluded from auto-log and summary calculations.' : ' — worklogs are still allowed.'}</div>`;
   }
 
+  if (isSplit) {
+    html += `<div class="half-day-note split">Split absence: <strong>Morning (${abs.am === 'oof' ? 'OOF' : 'Vacation'} · 0.5d)</strong> + <strong>Afternoon (${abs.pm === 'oof' ? 'OOF' : 'Vacation'} · 0.5d)</strong> — full day absent (0h expected work).</div>`;
+  } else if (isHalf) {
+    const freeWindowLabel = abs.occupiedPeriod === 'am'
+      ? `afternoon (from ${state.afternoonStart})`
+      : `morning (from ${state.morningStart})`;
+    html += `<div class="half-day-note${vacation ? ' vacation' : ''}">${isOof ? 'Out of Office' : 'Vacation'} · ${absencePeriodLongLabel(abs.occupiedPeriod)} — expected work: <strong>${fmtHours(dayExpectedHours(dateStr))}</strong> in the ${escapeHtml(freeWindowLabel)}.</div>`;
+  }
+
   if (!entries.length) {
     html += '<div class="no-entries">No work logged on this day.</div>';
   } else {
@@ -1001,8 +1235,11 @@ function renderDayDialogBody(dateStr) {
     html += `<div id="entryList">${entries.map((e, i) => entryRowHtml(e, overlapFlags[i])).join('')}</div>`;
   }
 
-  if (own && isAbsence(dateStr)) {
-    html += `<div class="readonly-note">This day is marked as ${isOof ? 'Out of Office' : 'Vacation'} — unmark it above to add a worklog.</div>`;
+  if (own && isFull) {
+    const fullLabel = isSplit
+      ? `Morning ${abs.am === 'oof' ? 'OOF' : 'Vacation'} + Afternoon ${abs.pm === 'oof' ? 'OOF' : 'Vacation'}`
+      : `${isOof ? 'Out of Office' : 'Vacation'} (Full day)`;
+    html += `<div class="readonly-note">This day is marked as ${fullLabel} — set Morning or Afternoon to Work above if you want to add a worklog.</div>`;
   } else if (own) {
     html += `
       <div class="add-entry-section">
@@ -1016,15 +1253,43 @@ function renderDayDialogBody(dateStr) {
   els.dayDialogBody.innerHTML = html;
 
   if (entries.length) wireEntryRows(dateStr);
-  if (own && !isAbsence(dateStr)) wireAddEntryForm(dateStr);
+  if (own && !isFull) wireAddEntryForm(dateStr);
   if (canManageAbsence) {
     document.querySelectorAll('#oofToggleWrapper [data-absence]').forEach((button) => button.addEventListener('click', async () => {
       const category = button.dataset.absence;
-      state.oofDates = await setOofDate(state.user.accountId, dateStr, category === 'oof');
-      state.vacationDates = await setVacationDate(state.user.accountId, dateStr, category === 'vacation');
-      state.oofDates = await loadOofDates(state.user.accountId);
+      let updated;
+      if (category === 'none') {
+        updated = await setDayHalves(state.user.accountId, dateStr, 'none', 'none');
+      } else {
+        const nextPeriod = entries.length
+          ? ((!abs.isSplit && abs.occupiedPeriod && abs.occupiedPeriod !== 'full') ? abs.occupiedPeriod : defaultHalfDayPeriodForEntries(entries))
+          : 'full';
+        updated = await setDayHalves(
+          state.user.accountId,
+          dateStr,
+          nextPeriod === 'full' || nextPeriod === 'am' ? category : 'none',
+          nextPeriod === 'full' || nextPeriod === 'pm' ? category : 'none'
+        );
+      }
+      state.oofDates = updated.oofDates;
+      state.vacationDates = updated.vacationDates;
       renderGrid();
       renderSummary();
+      renderBulkPanel();
+      renderDayDialogBody(dateStr);
+    }));
+    document.querySelectorAll('#oofToggleWrapper [data-half-slot]').forEach((button) => button.addEventListener('click', async () => {
+      if (button.disabled) return;
+      const slot = button.dataset.halfSlot;
+      const cat = button.dataset.halfCat;
+      const nextAm = slot === 'am' ? cat : abs.am;
+      const nextPm = slot === 'pm' ? cat : abs.pm;
+      const updated = await setDayHalves(state.user.accountId, dateStr, nextAm, nextPm);
+      state.oofDates = updated.oofDates;
+      state.vacationDates = updated.vacationDates;
+      renderGrid();
+      renderSummary();
+      renderBulkPanel();
       renderDayDialogBody(dateStr);
     }));
   }
@@ -1103,11 +1368,12 @@ function minutesToTime(minutes) {
 }
 
 function suggestedStartTime(dateStr) {
+  const defaultStart = workStartForDay(state.morningStart, state.afternoonStart, dayAbsence(dateStr).occupiedPeriod);
   const latestEnd = (state.byDate[dateStr] || []).reduce((latest, entry) => {
     const start = timeToMinutes(extractTime(entry.started));
     const end = start + Math.round(Number(entry.seconds || 0) / 60);
     return Math.max(latest, end);
-  }, timeToMinutes(state.morningStart));
+  }, timeToMinutes(defaultStart));
   return minutesToTime(latestEnd);
 }
 
@@ -1118,7 +1384,7 @@ function suggestedHours(dateStr) {
   ));
   // This is only a convenient default: the user can still enter any valid
   // duration when the remaining expected time has already been reached.
-  return Math.max(0.5, roundToHalfHour(state.expectedHours - loggedHours));
+  return Math.max(0.5, roundToHalfHour(dayExpectedHours(dateStr) - loggedHours));
 }
 
 function addHoursToTime(hhmm, hours) {
@@ -1277,12 +1543,13 @@ function wireAddEntryForm(dateStr) {
     formContainer.classList.remove('hidden');
     document.getElementById('oofToggleWrapper')?.classList.add('hidden');
     formContainer.innerHTML = `
-      <label>Task
+      <div class="issue-picker-field">
+        <label for="issuePickerInput">Task</label>
         <div class="issue-picker">
           <input type="text" id="issuePickerInput" placeholder="Search by key or title..." autocomplete="off" />
           <div id="issueSuggestions" class="issue-suggestions hidden"></div>
         </div>
-      </label>
+      </div>
       <div id="selectedIssueLabel" style="font-size:12px;color:var(--muted);"></div>
       <div id="issueDetailInfo" class="issue-detail-info hidden"></div>
       <div class="hours-with-total">
@@ -1415,48 +1682,17 @@ function wireAddEntryForm(dateStr) {
       retry.type = 'button';
       retry.className = 'issue-load-retry';
       retry.textContent = 'Retry';
-      retry.addEventListener('click', () => { void refreshOpenIssues(true); });
+      retry.addEventListener('click', (e) => {
+        e.stopPropagation();
+        issueInput.focus?.();
+        void refreshOpenIssues(true);
+      });
       suggestionsEl.replaceChildren(message, retry);
       suggestionsEl.classList.remove('hidden');
     }
 
-    async function refreshOpenIssues(force = false) {
-      if (openIssuesRequest) return openIssuesRequest;
-      openIssuesError = null;
-      if (shouldShowOpenIssues()) renderIssueLoading();
-      openIssuesRequest = loadOpenIssuesForDate(dateStr, force);
-      try {
-        openIssues = await openIssuesRequest;
-        openIssuesLoaded = true;
-        if (shouldShowOpenIssues()) renderIssueOptions(openIssues, null);
-        else if (document.activeElement === issueInput && issueInput.value.trim().length >= 2) {
-          issueInput.dispatchEvent(new Event('input'));
-        }
-      } catch (error) {
-        openIssuesLoaded = false;
-        openIssuesError = error;
-        console.error(error);
-        if (shouldShowOpenIssues()) renderIssueLoadError(error);
-      } finally {
-        openIssuesRequest = null;
-      }
-    }
-
-    // Wire listeners synchronously (no await before this point) so a fast
-    // click-then-focus from the user is never missed while the fetch below
-    // is still in flight — that race made the dropdown appear "stuck"
-    // invisible until an unrelated click forced a re-render.
-    issueInput.addEventListener('focus', () => {
-      if (!openIssuesLoaded) {
-        if (openIssuesError) renderIssueLoadError(openIssuesError);
-        else renderIssueLoading();
-        if (!openIssuesRequest) void refreshOpenIssues(Boolean(openIssuesError));
-        return;
-      }
-      renderIssueOptions(openIssues, null);
-    });
     let searchDebounce2;
-    issueInput.addEventListener('input', () => {
+    const handleIssueSearchInput = () => {
       clearTimeout(searchDebounce2);
       const q = issueInput.value.trim();
       if (q.length < 2) {
@@ -1474,7 +1710,55 @@ function wireAddEntryForm(dateStr) {
           console.error(err);
         }
       }, 250);
-    });
+    };
+
+    async function refreshOpenIssues(force = false) {
+      if (openIssuesRequest) return openIssuesRequest;
+      openIssuesError = null;
+      if (force || shouldShowOpenIssues()) renderIssueLoading();
+      openIssuesRequest = loadOpenIssuesForDate(dateStr, force);
+      try {
+        openIssues = await openIssuesRequest;
+        openIssuesLoaded = true;
+        if ((force && issueInput.value.trim().length < 2) || shouldShowOpenIssues()) {
+          renderIssueOptions(openIssues, null);
+        } else if (document.activeElement === issueInput && issueInput.value.trim().length >= 2) {
+          handleIssueSearchInput();
+        }
+      } catch (error) {
+        openIssuesLoaded = false;
+        openIssuesError = error;
+        console.error(error);
+        if (force || shouldShowOpenIssues()) renderIssueLoadError(error);
+      } finally {
+        openIssuesRequest = null;
+      }
+    }
+
+    // Wire listeners synchronously (no await before this point) so a fast
+    // click-then-focus from the user is never missed while the fetch below
+    // is still in flight — that race made the dropdown appear "stuck"
+    // invisible until an unrelated click forced a re-render.
+    const showOpenIssuesForInput = () => {
+      if (issueInput.value.trim().length >= 2) {
+        if (suggestionsEl.children.length) suggestionsEl.classList.remove('hidden');
+        else handleIssueSearchInput();
+        return;
+      }
+      if (!openIssuesLoaded) {
+        if (openIssuesError) {
+          renderIssueLoadError(openIssuesError);
+        } else {
+          renderIssueLoading();
+          if (!openIssuesRequest) void refreshOpenIssues();
+        }
+        return;
+      }
+      renderIssueOptions(openIssues, null);
+    };
+    issueInput.addEventListener('focus', showOpenIssuesForInput);
+    issueInput.addEventListener('click', showOpenIssuesForInput);
+    issueInput.addEventListener('input', handleIssueSearchInput);
 
     void refreshOpenIssues();
 
@@ -1547,6 +1831,7 @@ function computeStats(dataMap, rangeStart, rangeEnd) {
   let totalSeconds = 0;
   let weekdaysConsidered = 0;
   let weekdaysWithWork = 0;
+  let expectedTotal = 0;
   let oofCount = 0;
   const missing = [];
 
@@ -1558,12 +1843,20 @@ function computeStats(dataMap, rangeStart, rangeEnd) {
       const seconds = entries.reduce((s, e) => s + e.seconds, 0);
       totalSeconds += seconds;
       if (!isWeekend(cursor)) {
-        if (isAbsence(dateStr)) {
+        const abs = dayAbsence(dateStr);
+        if (isExcludedHoliday(dateStr)) {
           oofCount += 1;
-        } else if (isExcludedHoliday(dateStr)) {
+        } else if (abs.isFull) {
           oofCount += 1;
+        } else if (abs.isHalf) {
+          oofCount += 0.5;
+          weekdaysConsidered += 1;
+          expectedTotal += dayExpectedHours(dateStr);
+          if (seconds > 0) weekdaysWithWork += 1;
+          else missing.push({ dateStr, label: `${MONTH_LABELS[cursor.getMonth()].slice(0, 3)} ${cursor.getDate()} (½)` });
         } else {
           weekdaysConsidered += 1;
+          expectedTotal += state.expectedHours;
           if (seconds > 0) weekdaysWithWork += 1;
           else missing.push({ dateStr, label: `${MONTH_LABELS[cursor.getMonth()].slice(0, 3)} ${cursor.getDate()}` });
         }
@@ -1573,7 +1866,7 @@ function computeStats(dataMap, rangeStart, rangeEnd) {
   }
 
   const totalHours = secondsToHours(totalSeconds);
-  const expectedTotal = weekdaysConsidered * state.expectedHours;
+  expectedTotal = roundToHalfHour(expectedTotal);
   const coveragePct = expectedTotal > 0 ? Math.round((totalHours / expectedTotal) * 100) : 0;
 
   return { totalHours, weekdaysConsidered, weekdaysWithWork, oofCount, missing, expectedTotal, coveragePct };
@@ -1598,7 +1891,7 @@ function statsBlockHtml(title, stats) {
             <span class="label">Workdays with entries</span>
           </div>
           ${stats.oofCount > 0 ? `<div class="stat">
-            <span class="value">${stats.oofCount}</span>
+            <span class="value">${fmtDays(stats.oofCount)}</span>
             <span class="label">OOF / vacation / holidays</span>
           </div>` : ''}
         </div>
@@ -1613,31 +1906,35 @@ function statsBlockHtml(title, stats) {
 
 function vacationSummaryHtml(year) {
   const today = todayStr();
-  const vacationDates = [...state.vacationDates]
-    .filter((dateStr) => dateStr.startsWith(`${year}-`))
-    .filter((dateStr) => !isWeekend(new Date(`${dateStr}T12:00:00`)))
-    .sort();
-  const taken = vacationDates.filter((dateStr) => dateStr <= today);
-  const planned = vacationDates.filter((dateStr) => dateStr > today);
-  const committed = taken.length + planned.length;
+  const vacationEntries = [...state.vacationDates.entries()]
+    .filter(([dateStr]) => dateStr.startsWith(`${year}-`))
+    .filter(([dateStr]) => !isWeekend(new Date(`${dateStr}T12:00:00`)))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const takenEntries = vacationEntries.filter(([dateStr]) => dateStr <= today);
+  const plannedEntries = vacationEntries.filter(([dateStr]) => dateStr > today);
+  const sumDays = (list) => list.reduce((sum, [, period]) => sum + absenceDaysForPeriod(period), 0);
+  const taken = sumDays(takenEntries);
+  const planned = sumDays(plannedEntries);
+  const committed = taken + planned;
   const allowance = vacationAllowanceForYear(year);
   const remaining = Math.max(0, allowance - committed);
   const overbooked = Math.max(0, committed - allowance);
-  const nextDates = planned.slice(0, 5).map((dateStr) => {
+  const nextDates = plannedEntries.slice(0, 5).map(([dateStr, period]) => {
     const date = new Date(`${dateStr}T12:00:00`);
-    return `${date.getDate()} ${MONTH_LABELS[date.getMonth()].slice(0, 3)}`;
+    const base = `${date.getDate()} ${MONTH_LABELS[date.getMonth()].slice(0, 3)}`;
+    return period === 'full' ? base : `${base} (${period.toUpperCase()})`;
   });
   return `<div class="summary-block vacation-summary">
     <div class="summary-block-main">
       <div class="summary-block-title">Vacation allowance · ${year}</div>
       <div class="summary-stats">
-        <div class="stat"><span class="value">${allowance}</span><span class="label">Total days</span></div>
-        <div class="stat"><span class="value">${taken.length}</span><span class="label">Days taken</span></div>
-        <div class="stat"><span class="value">${planned.length}</span><span class="label">Days planned</span></div>
-        <div class="stat ${overbooked ? 'bad' : 'good'}"><span class="value">${remaining}</span><span class="label">Days available</span></div>
+        <div class="stat"><span class="value">${fmtDays(allowance)}</span><span class="label">Total days</span></div>
+        <div class="stat"><span class="value">${fmtDays(taken)}</span><span class="label">Days taken</span></div>
+        <div class="stat"><span class="value">${fmtDays(planned)}</span><span class="label">Days planned</span></div>
+        <div class="stat ${overbooked ? 'bad' : 'good'}"><span class="value">${fmtDays(remaining)}</span><span class="label">Days available</span></div>
       </div>
     </div>
-    <div class="missing-days">${overbooked ? `<span class="missing-label">Overbooked by ${overbooked} day${overbooked === 1 ? '' : 's'}.</span>` : nextDates.length ? `<span class="missing-label">Next planned:</span><div class="missing-days-chips">${nextDates.map((label) => `<span class="missing-day-chip">${label}</span>`).join('')}</div>` : '<span class="no-gaps">No future vacation days marked.</span>'}</div>
+    <div class="missing-days">${overbooked ? `<span class="missing-label">Overbooked by ${fmtDays(overbooked)} day${overbooked === 1 ? '' : 's'}.</span>` : nextDates.length ? `<span class="missing-label">Next planned:</span><div class="missing-days-chips">${nextDates.map((label) => `<span class="missing-day-chip">${label}</span>`).join('')}</div>` : '<span class="no-gaps">No future vacation days marked.</span>'}</div>
   </div>`;
 }
 
@@ -1899,7 +2196,7 @@ els.expectedHoursInput.addEventListener('change', () => {
 
 els.annualVacationDaysInput.addEventListener('change', () => {
   const year = String(state.anchor.getFullYear());
-  const value = Math.round(parseFloat(els.annualVacationDaysInput.value));
+  const value = roundToHalfHour(parseFloat(els.annualVacationDaysInput.value));
   state.annualVacationDaysByYear[year] = isNaN(value) || value < 0 ? 0 : value;
   els.annualVacationDaysInput.value = state.annualVacationDaysByYear[year];
   renderSummary();
@@ -2256,10 +2553,48 @@ document.addEventListener('click', (e) => {
   if (!els.autoLogInfoIcon.contains(e.target)) els.autoLogInfoIcon.classList.remove('open');
 });
 
-// A click on the dialog element itself is a click on its backdrop. Clicks
-// inside the dialog target one of its descendants and leave it open.
+function isDayDialogEditing() {
+  const addForm = document.getElementById('addEntryForm');
+  const isAdding = Boolean(addForm && !addForm.classList.contains('hidden'));
+  const isEditingRow = Boolean(els.dayDialogBody?.querySelector('.edit-row-form'));
+  return isAdding || isEditingRow;
+}
+
+function isDayDialogBackdropEvent(event) {
+  if (event.target !== els.dayDialog) return false;
+  if (typeof els.dayDialog.getBoundingClientRect === 'function' && typeof event.clientX === 'number' && typeof event.clientY === 'number') {
+    if (event.clientX === 0 && event.clientY === 0) return false;
+    const rect = els.dayDialog.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return (
+        event.clientX < rect.left ||
+        event.clientX > rect.right ||
+        event.clientY < rect.top ||
+        event.clientY > rect.bottom
+      );
+    }
+  }
+  return true;
+}
+
+// Track where mousedown started so dragging a text selection from inside the
+// dialog out onto the backdrop never closes the dialog. In addition, when the
+// user is actively adding or editing a worklog, clicking outside (or pressing
+// Escape) must not close the dialog; when only viewing the day's tasks, a
+// clean click on the backdrop closes the dialog.
+let dayDialogBackdropPointerDown = false;
+els.dayDialog.addEventListener('mousedown', (event) => {
+  dayDialogBackdropPointerDown = isDayDialogBackdropEvent(event);
+});
 els.dayDialog.addEventListener('click', (event) => {
-  if (event.target === els.dayDialog) els.dayDialog.close();
+  const clickedBackdrop = dayDialogBackdropPointerDown && isDayDialogBackdropEvent(event);
+  dayDialogBackdropPointerDown = false;
+  if (!clickedBackdrop) return;
+  if (isDayDialogEditing()) return;
+  els.dayDialog.close();
+});
+els.dayDialog.addEventListener('cancel', (event) => {
+  if (isDayDialogEditing()) event.preventDefault();
 });
 
 document.getElementById('dayDialogCloseBtn').addEventListener('click', () => {
@@ -2334,15 +2669,48 @@ els.importDataInput.addEventListener('change', async () => {
 
     const { oofByAccount: current = {}, vacationByAccount: currentVacations = {}, manualHolidays: currentManualHolidays = {} } = await chrome.storage.local.get(['oofByAccount', 'vacationByAccount', 'manualHolidays']);
     for (const [accountId, dates] of Object.entries(oofData)) {
-      const merged = new Set([...(current[accountId] || []), ...(Array.isArray(dates) ? dates : [])]);
-      current[accountId] = Array.from(merged);
+      const importedOof = Array.isArray(dates) ? dates : [];
+      current[accountId] = mergeAbsenceLists(current[accountId] || [], importedOof);
+      if (currentVacations[accountId]?.length) {
+        const oofMap = absenceMapFromList(current[accountId]);
+        const vacMap = absenceMapFromList(currentVacations[accountId]);
+        for (const raw of importedOof) {
+          const entry = parseAbsenceEntry(raw);
+          if (!entry) continue;
+          const existingVac = vacMap.get(entry.date);
+          if (!existingVac) continue;
+          const mergedOof = oofMap.get(entry.date);
+          if (entry.period === 'full' || mergedOof === 'full' || existingVac === entry.period) {
+            vacMap.delete(entry.date);
+          } else if (existingVac === 'full') {
+            vacMap.set(entry.date, entry.period === 'am' ? 'pm' : 'am');
+          }
+        }
+        currentVacations[accountId] = serializeAbsenceMap(vacMap);
+      }
     }
     for (const [accountId, datesOrYears] of Object.entries(vacationData)) {
       const importedDates = Array.isArray(datesOrYears)
         ? datesOrYears
         : Object.values(datesOrYears || {}).flatMap((dates) => Array.isArray(dates) ? dates : []);
-      const merged = new Set([...(currentVacations[accountId] || []), ...importedDates]);
-      currentVacations[accountId] = Array.from(merged);
+      currentVacations[accountId] = mergeAbsenceLists(currentVacations[accountId] || [], importedDates);
+      if (current[accountId]?.length) {
+        const vacMap = absenceMapFromList(currentVacations[accountId]);
+        const oofMap = absenceMapFromList(current[accountId]);
+        for (const raw of importedDates) {
+          const parsedEntry = parseAbsenceEntry(raw);
+          if (!parsedEntry) continue;
+          const existingOof = oofMap.get(parsedEntry.date);
+          if (!existingOof) continue;
+          const mergedVac = vacMap.get(parsedEntry.date);
+          if (parsedEntry.period === 'full' || mergedVac === 'full' || existingOof === parsedEntry.period) {
+            oofMap.delete(parsedEntry.date);
+          } else if (existingOof === 'full') {
+            oofMap.set(parsedEntry.date, parsedEntry.period === 'am' ? 'pm' : 'am');
+          }
+        }
+        current[accountId] = serializeAbsenceMap(oofMap);
+      }
     }
     for (const [dateStr, holiday] of Object.entries(manualHolidayData)) {
       if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr) && holiday && typeof holiday === 'object') currentManualHolidays[dateStr] = holiday;
@@ -2444,3 +2812,81 @@ async function loadSettings() {
   await loadSettings();
   await refresh();
 })();
+
+if (typeof module !== 'undefined') {
+  module.exports = {
+    state,
+    els,
+    pad,
+    fmtDate,
+    todayStr,
+    isWeekend,
+    vacationAllowanceForYear,
+    syncVacationEntitlementInputs,
+    holidayForDate,
+    oofPeriod,
+    vacationPeriod,
+    dayAbsence,
+    absenceInfo,
+    isVacation,
+    isAbsence,
+    isFullAbsence,
+    isHalfAbsence,
+    dayExpectedHours,
+    fmtDays,
+    absencePeriodLongLabel,
+    defaultHalfDayPeriodForEntries,
+    isExcludedHoliday,
+    entriesInChronologicalOrder,
+    mondayIndex,
+    startOfWeek,
+    getRange,
+    escapeHtml,
+    secondsToHours,
+    roundToHalfHour,
+    fmtHours,
+    badgeClass,
+    isOwnUser,
+    loadOofDates,
+    loadVacationDates,
+    setDayHalves,
+    setDayAbsence,
+    setOofDate,
+    setVacationDate,
+    monthChipLimit,
+    renderGrid,
+    renderYearGrid,
+    renderWeekdayHeader,
+    updatePeriodLabel,
+    selectCalendarDay,
+    openDayDialog,
+    renderDayDialogBody,
+    renderBulkPanel,
+    clearBulkSelection,
+    findOverlappingEntries,
+    extractTime,
+    suggestedStartTime,
+    suggestedHours,
+    addHoursToTime,
+    computeStats,
+    vacationSummaryHtml,
+    renderSummary,
+    isDayDialogEditing,
+    isDayDialogBackdropEvent,
+    refresh,
+    loadSettings,
+    migrateLegacyOofData,
+    setApiError,
+    renderManualHolidayList,
+    loadDiagnostics,
+    renderDiagnostics,
+    loadAutoLogStatus,
+    renderAutoLogStatus,
+    loadStatusFilters,
+    saveStatusFilters,
+    ensureConfigured,
+    openSetupDialog,
+    manageCredentials,
+  };
+}
+

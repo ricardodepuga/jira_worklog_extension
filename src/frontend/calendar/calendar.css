@@ -43,10 +43,9 @@ body {
 
 .controls {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px 16px;
   position: relative;
 }
 
@@ -54,7 +53,13 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  gap: 10px 14px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.header-actions {
+  flex: 0 0 auto;
 }
 
 .options-group {
@@ -72,6 +77,7 @@ body {
 
 .data-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -81,6 +87,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-width: 100%;
 }
 
 .user-picker label {
@@ -94,7 +101,9 @@ body {
   color: var(--text);
   padding: 6px 10px;
   border-radius: 6px;
-  min-width: 220px;
+  width: 220px;
+  max-width: 100%;
+  min-width: 0;
   font-size: 13px;
 }
 #userInput:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -129,17 +138,9 @@ body {
 
 .view-toggle, .nav {
   display: flex;
+  align-items: center;
   gap: 4px;
-}
-
-.nav {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  box-shadow: 0 0 0 1px var(--border), 0 5px 14px rgba(0,0,0,.18);
-  border-radius: 7px;
-  padding: 3px;
-  background: var(--panel-alt);
+  flex-shrink: 0;
 }
 
 .toggle-btn, .nav button {
@@ -164,7 +165,8 @@ body {
 .period-label {
   font-size: 14px;
   font-weight: 600;
-  min-width: 160px;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .option-checkbox {
@@ -241,13 +243,19 @@ body {
 }
 
 .export-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   background: var(--panel-alt);
   border: 1px solid var(--border);
-  color: var(--muted);
-  padding: 6px 12px;
+  color: var(--text);
+  padding: 6px 10px;
   border-radius: 6px;
   cursor: pointer;
+  font: inherit;
   font-size: 12px;
+  white-space: nowrap;
 }
 .export-btn:hover { border-color: var(--accent); color: var(--text); }
 
@@ -255,14 +263,17 @@ body {
   width: 32px;
   height: 32px;
   padding: 6px;
+  color: var(--muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
+.export-btn svg,
 .icon-btn svg {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -272,10 +283,6 @@ body {
 
 .header-actions .icon-btn { width: 42px; height: 42px; padding: 8px; }
 .header-actions .icon-btn svg { width: 25px; height: 25px; stroke-width: 1.7; }
-
-@media (max-width: 760px) {
-  .nav { position: static; transform: none; box-shadow: none; padding: 0; }
-}
 
 main {
   padding: 12px 24px;
@@ -383,6 +390,12 @@ main {
 .year-day.bad { background: rgba(241,91,80,0.18); color: var(--bad); }
 .year-day.oof { background: rgba(76,154,255,0.18); color: var(--accent); }
 .year-day.vacation { background: rgba(168, 120, 255, 0.2); color: #c6a8ff; }
+.year-day.oof.half-am { background: linear-gradient(135deg, rgba(76,154,255,0.22) 50%, transparent 50%); }
+.year-day.oof.half-pm { background: linear-gradient(135deg, transparent 50%, rgba(76,154,255,0.22) 50%); }
+.year-day.vacation.half-am { background: linear-gradient(135deg, rgba(168,120,255,0.25) 50%, transparent 50%); }
+.year-day.vacation.half-pm { background: linear-gradient(135deg, transparent 50%, rgba(168,120,255,0.25) 50%); }
+.year-day.split-oof-vacation { background: linear-gradient(135deg, rgba(76,154,255,0.24) 50%, rgba(168,120,255,0.26) 50%); color: var(--text); }
+.year-day.split-vacation-oof { background: linear-gradient(135deg, rgba(168,120,255,0.26) 50%, rgba(76,154,255,0.24) 50%); color: var(--text); }
 .year-day.holiday { outline: 1px solid rgba(255,171,0,0.55); }
 .year-day.today { box-shadow: 0 0 0 1px var(--accent) inset; }
 .year-day.selected { box-shadow: 0 0 0 1px var(--warn) inset; }
@@ -435,7 +448,7 @@ main {
   border-radius: 8px;
   min-height: 0;
   overflow: hidden;
-  padding: 8px;
+  padding: 6px 8px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -445,19 +458,28 @@ main {
 
 .day-cell:hover { border-color: var(--accent); }
 
+.day-cell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  flex-shrink: 0;
+  min-width: 0;
+  white-space: nowrap;
+}
+
 .day-cell.empty-slot { visibility: hidden; cursor: default; }
 .day-cell.weekend { background: var(--weekend); }
 .day-cell.future { opacity: 0.45; cursor: default; }
 .day-cell.today .date-num {
   color: var(--accent);
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  gap: 5px;
 }
 .day-cell.today .date-num::after {
   content: "Today";
-  padding: 2px 6px;
+  padding: 1px 5px;
   border-radius: 999px;
   background: rgba(76,154,255,0.14);
   color: var(--accent);
@@ -470,6 +492,12 @@ main {
 .bulk-panel{position:fixed;right:20px;bottom:20px;z-index:50;width:min(440px,calc(100vw - 40px));max-height:70vh;overflow:auto;background:var(--panel);border:1px solid var(--warn);border-radius:10px;padding:14px;box-shadow:0 12px 35px rgba(0,0,0,.5)}.bulk-panel.hidden{display:none}.bulk-panel header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px}.bulk-panel h3{margin:0 0 3px;font-size:15px}.bulk-panel header span{font-size:11px;color:var(--muted)}.bulk-summary{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}.bulk-summary-row{padding:7px 9px;background:var(--panel-alt);border-radius:6px;font-size:11px;color:var(--muted)}.bulk-actions{display:flex;justify-content:flex-end;gap:8px}.bulk-actions.hidden{display:none}.bulk-actions button,.bulk-worklog-form button{border:1px solid var(--border);border-radius:6px;background:var(--panel-alt);color:var(--text);padding:7px 10px;cursor:pointer}.bulk-actions button.primary,.bulk-worklog-form button.primary{background:var(--accent);border-color:var(--accent);color:#05101f;font-weight:600}.bulk-worklog-form{display:flex;flex-direction:column;gap:10px}.bulk-worklog-form.hidden{display:none}.bulk-worklog-form label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted)}.bulk-worklog-form input,.bulk-worklog-form select,.bulk-worklog-form textarea{background:var(--panel-alt);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:7px;font:inherit}.bulk-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}.bulk-panel .form-error{margin:8px 0}
 .day-cell.oof { background: rgba(76,154,255,0.08); }
 .day-cell.vacation { background: rgba(168, 120, 255, 0.1); }
+.day-cell.oof.half-am { background: linear-gradient(180deg, rgba(76,154,255,0.11) 0%, rgba(76,154,255,0.11) 50%, var(--panel) 50%, var(--panel) 100%); }
+.day-cell.oof.half-pm { background: linear-gradient(180deg, var(--panel) 0%, var(--panel) 50%, rgba(76,154,255,0.11) 50%, rgba(76,154,255,0.11) 100%); }
+.day-cell.vacation.half-am { background: linear-gradient(180deg, rgba(168,120,255,0.13) 0%, rgba(168,120,255,0.13) 50%, var(--panel) 50%, var(--panel) 100%); }
+.day-cell.vacation.half-pm { background: linear-gradient(180deg, var(--panel) 0%, var(--panel) 50%, rgba(168,120,255,0.13) 50%, rgba(168,120,255,0.13) 100%); }
+.day-cell.split-oof-vacation { background: linear-gradient(180deg, rgba(76,154,255,0.12) 0%, rgba(76,154,255,0.12) 50%, rgba(168,120,255,0.14) 50%, rgba(168,120,255,0.14) 100%); }
+.day-cell.split-vacation-oof { background: linear-gradient(180deg, rgba(168,120,255,0.14) 0%, rgba(168,120,255,0.14) 50%, rgba(76,154,255,0.12) 50%, rgba(76,154,255,0.12) 100%); }
 .day-cell.holiday { background: rgba(255,171,0,0.07); }
 .day-cell.holiday-blocked { border-color: rgba(255,171,0,0.5); }
 
@@ -477,14 +505,58 @@ main {
   font-size: 13px;
   color: var(--muted);
   font-weight: 600;
+  flex-shrink: 0;
+}
+
+.day-badges {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  flex-shrink: 0;
+  margin-top: auto;
+}
+
+.task-count-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(139, 147, 163, 0.16);
+  color: var(--muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.task-count-badge.multi {
+  background: rgba(76, 154, 255, 0.18);
+  color: var(--accent);
 }
 
 .day-cell .hours-badge {
+  display: inline-block;
   align-self: flex-start;
-  font-size: 15px;
+  font-size: 12px;
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 12px;
+  line-height: 1.3;
+  text-align: center;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.day-cell .hours-badge.half-badge {
+  min-width: 58px;
+  text-align: center;
+}
+
+.day-cell .hours-badge:not(.oof-badge):not(.vacation-badge):not(.holiday-badge) {
+  margin-left: auto;
 }
 
 .hours-badge.good { background: rgba(54,179,126,0.18); color: var(--good); }
@@ -493,7 +565,7 @@ main {
 .hours-badge.none { background: transparent; color: var(--muted); font-weight: 400; }
 .hours-badge.oof-badge { background: rgba(76,154,255,0.18); color: var(--accent); }
 .hours-badge.vacation-badge { background: rgba(168, 120, 255, 0.2); color: #c6a8ff; }
-.hours-badge.holiday-badge { max-width: 100%; overflow: hidden; background: rgba(255,171,0,0.18); color: var(--warn); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.hours-badge.holiday-badge { max-width: 100%; min-width: 0; flex-shrink: 1; overflow: hidden; background: rgba(255,171,0,0.18); color: var(--warn); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .holiday-settings { display: flex; align-items: end; gap: 8px; }
 .holiday-settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
 .holiday-settings select { background: var(--panel-alt); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px; font: inherit; }
@@ -572,7 +644,8 @@ main {
 .manual-holiday-empty { color: var(--muted); font-size: 11px; }
 #manualHolidayError { margin-top: 7px; }
 #manualHolidayError.hidden { display: none; }
-.settings-section .data-actions { justify-content: flex-start; }
+.settings-section .data-actions { justify-content: flex-start; gap: 6px; }
+.settings-section .data-actions .export-btn { flex: 1 1 auto; padding: 7px 8px; }
 .diagnostics-help { margin: 0 0 10px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .diagnostics-subheading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 14px 0 7px; color: var(--text); font-size: 11px; }
 .diagnostics-subheading span { color: var(--muted); font-size: 9px; font-weight: 400; text-transform: uppercase; letter-spacing: .04em; }
@@ -597,24 +670,57 @@ main {
   font-size: 11px;
   color: var(--muted);
   flex: 1;
-  margin: 6px 0;
+  margin: 3px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
 }
 .calendar-grid:not(.week-view):not(.year-view) .day-cell .issue-list { overflow: hidden; }
+/* Half-day absences: tasks sit in the half that is actually worked.
+   Morning absent (half-am) -> tasks in the bottom (afternoon) half;
+   afternoon absent (half-pm) -> tasks stay in the top (morning) half. */
+.day-cell.half-absence.half-am .issue-list { justify-content: flex-start; }
+.day-cell.half-absence.half-am .issue-list > :first-child { margin-top: auto; }
+.day-cell.half-absence.half-pm .issue-list { justify-content: flex-start; }
 .day-cell .issue-list .chip {
   background: var(--panel-alt);
   border-radius: 4px;
   padding: 2px 6px;
-  margin-bottom: 3px;
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   line-height: 15px;
+  flex-shrink: 0;
+}
+.day-cell .issue-list .chip .chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.day-cell .issue-list .chip .chip-key {
+  color: var(--accent);
+  font-weight: 600;
+}
+.day-cell .issue-list .chip .chip-more-inline {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(76, 154, 255, 0.2);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
 }
 .day-cell .issue-list .chip-more {
   color: var(--accent);
   background: transparent;
-  padding: 2px 6px 0;
+  padding: 1px 6px 0;
+  font-weight: 600;
 }
 
 .day-cell .issue-list .chip.auto-chip {
@@ -842,13 +948,31 @@ main {
 .oof-toggle input { cursor: pointer; }
 #oofToggleWrapper.hidden { display: none; }
 .absence-label { margin-bottom: 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
-.absence-selector { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
-.absence-selector button { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); padding: 7px 9px; cursor: pointer; font: inherit; font-size: 12px; }
-.absence-selector button:hover { color: var(--text); background: var(--panel-alt); }
-.absence-selector button.active { color: var(--text); border-color: var(--border); background: var(--panel-alt); box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+.absence-selector, .absence-period-selector { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.absence-selector:has(+ .absence-period-selector), .absence-selector:has(+ .absence-halves-box), .absence-period-selector:has(+ .absence-halves-box) { margin-bottom: 6px; }
+.absence-selector button, .absence-period-selector button { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); padding: 7px 9px; cursor: pointer; font: inherit; font-size: 12px; }
+.absence-period-selector button { padding: 5px 8px; font-size: 11px; }
+.absence-selector button:hover:not(:disabled), .absence-period-selector button:hover:not(:disabled) { color: var(--text); background: var(--panel-alt); }
+.absence-selector button.active, .absence-period-selector button.active { color: var(--text); border-color: var(--border); background: var(--panel-alt); box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+.absence-selector button:disabled, .absence-period-selector button:disabled { opacity: .45; cursor: not-allowed; }
+.absence-halves-box { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.absence-half-card { display: flex; flex-direction: column; gap: 5px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.absence-half-title { color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.absence-half-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.absence-half-options button { display: flex; align-items: center; justify-content: center; gap: 4px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); padding: 4px 5px; cursor: pointer; font: inherit; font-size: 11px; }
+.absence-half-options button:hover:not(:disabled) { color: var(--text); background: var(--panel-alt); }
+.absence-half-options button.active { color: var(--text); border-color: var(--border); background: var(--panel-alt); box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+.absence-half-options button:disabled { opacity: .4; cursor: not-allowed; }
 .absence-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
 .absence-dot.oof { background: var(--accent); }
 .absence-dot.vacation { background: #b58cff; }
+.half-day-note { margin: 0 0 12px; padding: 8px 10px; border-left: 3px solid var(--accent); background: rgba(76,154,255,0.09); border-radius: 4px; font-size: 12px; color: var(--text); }
+.half-day-note.vacation { border-left-color: #b58cff; background: rgba(168,120,255,0.11); }
+.half-day-note.split { border-left-color: var(--accent); background: linear-gradient(90deg, rgba(76,154,255,0.1) 0%, rgba(168,120,255,0.11) 100%); }
+.bulk-period-bar { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
+.bulk-period-bar.hidden { display: none; }
+.bulk-period-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.bulk-period-bar .absence-period-selector { margin-bottom: 0; }
 .entry-row .time { font-weight: 600; white-space: nowrap; }
 .entry-row .entry-actions { display: flex; gap: 6px; align-items: center; }
 .entry-row .entry-actions button {
@@ -952,21 +1076,20 @@ main {
 }
 .issue-detail-info.hidden { display: none; }
 
+.issue-picker-field { display: flex; flex-direction: column; gap: 3px; }
 .issue-picker { position: relative; }
+.issue-picker input { width: 100%; }
 .issue-suggestions {
-  /* In-flow (not absolutely positioned) on purpose: this dropdown lives
-     inside #dayDialogBody, which itself scrolls. An absolutely-positioned
-     overlay gets clipped by that ancestor's overflow once it would overlap
-     content below the current scroll position, and the clipped-out part
-     is not just invisible — it can't receive wheel/pointer events either,
-     which made scrolling inside the list appear broken. Keeping it in
-     normal flow means the list is always fully painted and its own
-     overflow-y:auto works. */
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
   background: var(--panel-alt);
   border: 1px solid var(--border);
   border-radius: 6px;
-  margin-top: 4px;
-  max-height: 200px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  max-height: 175px;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;

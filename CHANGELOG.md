@@ -6,9 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-23
+
 ### Added
 
 - Task filters now include a manual status synchronization action that refreshes the Jira catalogue and currently assigned active-task statuses without changing saved selections.
+- OOF and Vacation now support Morning and Afternoon half-days (0.5d) alongside full days in the day dialog and bulk actions, including split absences (half-day OOF + half-day Vacation on the same day), adjusting expected daily hours, suggested start times, period/vacation summaries, and automatic worklog planning.
+- Day dialog now always shows Morning (0.5d) and Afternoon (0.5d) selectors directly below `Day category` for immediate half-day and split OOF + Vacation selection.
+- On half-day absence days in Month and Week views, task chips are positioned in the worked half (bottom half when Morning is absent, top half when Afternoon is absent).
+- Month view day cells now display a compact task count badge (`1 task` / `N tasks`) in the header, an inline `+N` indicator on the last visible chip with a full tooltip, and a bottom badge bar with uniform absence badges (`OOF ½`, `Vac ½`, `OOF`, `Vacation`) on the left and the daily total hours badge fixed on the right.
+- Settings → `Data and connection` buttons (`Jira connection`, `Export data`, `Import data`) now display clear text labels alongside their icons.
+
+### Fixed
+
+- The top bar view selector (`Year` / `Month` / `Week`) and navigation buttons (`‹` / `Today` / `›`) now stay in normal flex flow and wrap cleanly without overlapping when the window is narrowed horizontally.
+- The task search suggestions list in the Day dialog now opens on click or focus as a scrollable overlay (`max-height: 175px; overflow-y: auto`) without resizing the dialog or being re-triggered by `<label>` clicks.
+- The Day dialog no longer closes when dragging a selection from inside the dialog to the outside backdrop, or when clicking outside / pressing Escape while adding or editing a worklog; in read-only viewing mode, a clean click outside on the backdrop closes the dialog.
 
 ## [1.6.7] - 2026-10-08
 

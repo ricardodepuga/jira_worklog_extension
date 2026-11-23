@@ -65,4 +65,21 @@ test('builds separate default status filters for auto-log and task lists', () =>
   ]);
   assert.equal(isLegacyBroadStatusSelection(Array.from({ length: 21 }, (_, index) => index)), true);
   assert.equal(isLegacyBroadStatusSelection(['3', '4', '5']), false);
+  assert.equal(isLegacyBroadStatusSelection(null), false);
+
+  assert.deepEqual(findStoryPointsFieldIds(null), []);
+  assert.deepEqual(findStoryPointsFieldIds([null, {}]), []);
+  assert.deepEqual(activeWorkflowStatuses(null), []);
+  assert.deepEqual(activeWorkflowStatuses([
+    null,
+    { id: '99', name: '', statusCategory: { name: 'In Progress' } },
+    { id: '100', name: 'Sprint 12 - ', statusCategory: { name: 'In Progress' } },
+  ]), [
+    { id: '99', ids: ['99'], name: '99' },
+    { id: '100', ids: ['100'], name: 'Sprint 12 -' },
+  ]);
+  assert.deepEqual(relevantWorkflowStatuses(statuses, null, null), []);
+  assert.deepEqual(manualIssueKeys(null, null), []);
+  assert.deepEqual(manualIssueKeys('42', null), []);
+  assert.deepEqual(manualIssueKeys('42', [null, 'APP']), ['APP-42']);
 });

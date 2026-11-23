@@ -77,7 +77,7 @@
           <div class="vacation-entitlement-setting">
             <label>
               <span class="setting-label-row"><span>Annual vacation</span><span id="annualVacationYearLabel" class="setting-year-badge"></span></span>
-              <span class="entitlement-input"><input id="annualVacationDaysInput" type="number" min="0" max="366" step="1" value="22" /><span>days</span></span>
+              <span class="entitlement-input"><input id="annualVacationDaysInput" type="number" min="0" max="366" step="0.5" value="22" /><span>days</span></span>
             </label>
           </div>
         </div>
@@ -165,14 +165,17 @@
       <details class="settings-section" data-settings-section="data-connection">
         <summary>Data and connection</summary>
         <div class="data-actions">
-          <button type="button" id="manageCredentialsBtn" class="export-btn icon-btn" title="Jira connection" aria-label="Manage Jira connection">
+          <button type="button" id="manageCredentialsBtn" class="export-btn" title="Jira connection" aria-label="Manage Jira connection">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 14.5 5 17a3 3 0 0 0 4.24 4.24l3.26-3.26a3 3 0 0 0 0-4.24"/><path d="m16.5 9.5 2.5-2.5a3 3 0 0 0-4.24-4.24L11.5 6.02a3 3 0 0 0 0 4.24"/><path d="m9 15 6-6"/></svg>
+            <span>Jira connection</span>
           </button>
-          <button type="button" id="exportDataBtn" class="export-btn icon-btn" title="Export data" aria-label="Export data">
+          <button type="button" id="exportDataBtn" class="export-btn" title="Export data" aria-label="Export data">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            <span>Export data</span>
           </button>
-          <button type="button" id="importDataBtn" class="export-btn icon-btn" title="Import data" aria-label="Import data">
+          <button type="button" id="importDataBtn" class="export-btn" title="Import data" aria-label="Import data">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 3h14"/></svg>
+            <span>Import data</span>
           </button>
           <input type="file" id="importDataInput" accept="application/json" hidden />
         </div>
@@ -229,6 +232,14 @@
     </header>
     <div id="bulkSummary" class="bulk-summary"></div>
     <div id="bulkError" class="form-error hidden"></div>
+    <div id="bulkPeriodBar" class="bulk-period-bar">
+      <span class="bulk-period-label">Absence duration</span>
+      <div id="bulkPeriodSelector" class="absence-period-selector" role="group" aria-label="Bulk absence duration">
+        <button type="button" data-bulk-period="full" class="active">Full day (1d)</button>
+        <button type="button" data-bulk-period="am">Morning (0.5d)</button>
+        <button type="button" data-bulk-period="pm">Afternoon (0.5d)</button>
+      </div>
+    </div>
     <div id="bulkActions" class="bulk-actions">
       <button type="button" id="bulkOofBtn">Mark OOF</button>
       <button type="button" id="bulkVacationBtn">Mark vacation</button>
@@ -278,6 +289,7 @@
     </form>
   </dialog>
 
+  <script src="../../shared/time-utils.js"></script>
   <script src="calendar.js"></script>
 </body>
 </html>

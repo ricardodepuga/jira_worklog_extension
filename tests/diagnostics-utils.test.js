@@ -29,3 +29,22 @@ test('truncates diagnostic content before persisting it', () => {
   assert.equal(entry.message.length, 600);
   assert.equal(entry.stack.length, 2000);
 });
+
+test('handles missing error fields, default timestamps, and non-array diagnostic lists', () => {
+  const fromNull = diagnostics.createDiagnosticEntry(null, '');
+  assert.equal(fromNull.context, 'Extension');
+  assert.equal(fromNull.message, 'Unknown error');
+  assert.equal(fromNull.stack, '');
+  assert.ok(fromNull.id.length > 0);
+
+  const fromNameOnly = diagnostics.createDiagnosticEntry(Object.assign(new Error(''), { name: 'CustomError' }), 'Test');
+  assert.equal(fromNameOnly.message, 'CustomError');
+
+  const emptyError = new Error('');
+  emptyError.name = '';
+  const fromEmptyError = diagnostics.createDiagnosticEntry(emptyError, 'Test');
+  assert.equal(fromEmptyError.message, 'Unknown error');
+
+  const kept = diagnostics.keepLatestDiagnostics(null, fromNull, 0);
+  assert.equal(kept.length, 1);
+});
